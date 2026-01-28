@@ -29,3 +29,6 @@ go.work.sum
 
 # VSCode file
 .vscode/*
+
+# out
+/out
