@@ -1,0 +1,4 @@
+curl -X {{Verb}} \
+    -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+    "https://{{Host}}{{Path}}"{{! Handle query parameters}} {{#Body}}\
+    -d '{{{Body}}}'{{/Body}}

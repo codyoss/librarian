@@ -1,0 +1,27 @@
+package main
+
+import (
+	"context"
+
+  {{#Imports}}
+  "{{.}}"
+  {{/Imports}}
+)
+
+func main() {
+	ctx := context.Background()
+  c, err := {{PackageName}}.New{{ClientName}}Client(ctx)
+  if err != nil {
+    // TODO: handle error
+  }
+  defer c.Close()
+
+  req := {{{RequestInit}}}
+  resp, err := c.{{MethodName}}(ctx, req)
+  if err != nil {
+    // TODO: handle error
+  }
+  
+  // TODO: use response
+  _ = resp
+}
