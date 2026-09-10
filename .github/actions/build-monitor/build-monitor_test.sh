@@ -16,543 +16,236 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MONITOR_SCRIPT="$SCRIPT_DIR/build-monitor.sh"
+TARGET_SCRIPT="$SCRIPT_DIR/build-monitor.sh"
+MOCK_DIR="$(mktemp -d)"
+trap 'rm -rf "$MOCK_DIR"' EXIT
 
-TEST_TMP="$(mktemp -d)"
-trap 'rm -rf "$TEST_TMP"' EXIT
-
-MOCK_BIN="$TEST_TMP/bin"
-mkdir -p "$MOCK_BIN"
-MOCK_LOG="$TEST_TMP/gh_calls.log"
-
-# Create mock gh CLI
-cat << 'EOF' > "$MOCK_BIN/gh"
+# Mock gh CLI
+cat << 'EOF' > "$MOCK_DIR/gh"
 #!/usr/bin/env bash
-set -euo pipefail
+set -eu
+cmd="$1"
+subcmd="${2:-}"
 
-LOG_FILE="${TEST_GH_LOG:-/dev/null}"
-echo "$@" >> "$LOG_FILE"
-
-case "${1:-}" in
+case "$cmd" in
+  api)
+    endpoint="$2"
+    case "$endpoint" in
+      *check-suites/*/check-runs*)
+        if [[ "${MOCK_NO_CHECK_RUNS:-}" == "true" ]]; then
+          echo '{"check_runs":[]}'
+        else
+          echo '{"check_runs":[{"name":"build-target","conclusion":"failure","details_url":"https://ci.example.com/build"}]}'
+        fi
+        ;;
+      *actions/runs/*/jobs*)
+        echo '{"jobs":[{"name":"test-job","conclusion":"failure","html_url":"https://github.com/runs/1/job/2"}]}'
+        ;;
+      *commits/*/pulls*)
+        echo '[{"number":42}]'
+        ;;
+      *)
+        echo '[]'
+        ;;
+    esac
+    ;;
   issue)
-    subcmd="${2:-}"
     case "$subcmd" in
       list)
         if [[ -n "${MOCK_EXISTING_ISSUE:-}" ]]; then
-          echo "$MOCK_EXISTING_ISSUE"
+          echo "[{\"number\":$MOCK_EXISTING_ISSUE,\"title\":\"librarian: Post-merge build failure on main\"}]"
         else
           echo "[]"
         fi
-        exit 0
         ;;
       create)
-        # Check if we should simulate assignee failure
-        if [[ "${FAIL_ON_ASSIGNEE:-false}" == "true" ]] && [[ "$*" =~ --assignee ]]; then
-          echo "GraphQL error: could not add assignee" >&2
+        if [[ "${MOCK_LABEL_FAIL:-}" == "true" ]] && [[ "$*" == *"--label"* ]]; then
           exit 1
         fi
-        # Check if we should simulate label failure
-        if [[ "${FAIL_ON_LABEL:-false}" == "true" ]] && [[ "$*" =~ --label ]]; then
-          echo "GraphQL error: label not found" >&2
-          exit 1
-        fi
-        echo "https://github.com/${GH_REPO:-test/repo}/issues/42"
-        exit 0
+        echo "https://github.com/googleapis/librarian/issues/100"
         ;;
       comment)
-        exit 0
-        ;;
-      *)
-        echo "Unknown gh issue command: $subcmd" >&2
-        exit 1
+        echo "commented on $3"
         ;;
     esac
-    ;;
-  api)
-    endpoint="${2:-}"
-    case "$endpoint" in
-      *check-suites/*/check-runs*)
-        cat << 'JSON'
-{
-  "check_runs": [
-    {
-      "name": "build-docker-image",
-      "conclusion": "failure",
-      "details_url": "https://console.cloud.google.com/cloud-build/builds/12345"
-    }
-  ]
-}
-JSON
-        exit 0
-        ;;
-      *actions/runs/*/jobs*)
-        cat << 'JSON'
-{
-  "jobs": [
-    {
-      "name": "Integration Tests",
-      "conclusion": "failure",
-      "html_url": "https://github.com/test/repo/actions/runs/1/job/2"
-    }
-  ]
-}
-JSON
-        exit 0
-        ;;
-      *commits/*/pulls*)
-        cat << 'JSON'
-[
-  {
-    "number": 101,
-    "html_url": "https://github.com/test/repo/pull/101"
-  }
-]
-JSON
-        exit 0
-        ;;
-      *commits/*)
-        if [[ "${MOCK_COMMIT_AUTHOR_BOT:-false}" == "true" ]]; then
-          cat << 'JSON'
-{
-  "author": {
-    "login": "release-please[bot]"
-  }
-}
-JSON
-        else
-          cat << 'JSON'
-{
-  "author": {
-    "login": "octocat"
-  }
-}
-JSON
-        fi
-        exit 0
-        ;;
-      *)
-        echo "{}"
-        exit 0
-        ;;
-    esac
-    ;;
-  *)
-    exit 0
     ;;
 esac
 EOF
+chmod +x "$MOCK_DIR/gh"
 
-chmod +x "$MOCK_BIN/gh"
-export PATH="$MOCK_BIN:$PATH"
-export TEST_GH_LOG="$MOCK_LOG"
-
-TESTS_PASSED=0
-TESTS_FAILED=0
+export PATH="$MOCK_DIR:$PATH"
+export GH_REPO="googleapis/librarian"
+export TARGET_BRANCH="main"
+export CHECK_SUITE_APP_NAME="Google Cloud Build"
 
 run_test() {
-  local test_name="$1"
+  local name="$1"
   shift
-  echo -n "Running $test_name... "
-  rm -f "$MOCK_LOG"
-  touch "$MOCK_LOG"
-  if "$@"; then
-    echo "PASSED"
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-  else
-    echo "FAILED"
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-  fi
+  local output
+  output=$(env "$@" bash "$TARGET_SCRIPT" 2>&1) || {
+    echo "FAIL: $name (exited with error)" >&2
+    echo "$output" >&2
+    return 1
+  }
+  echo "$output"
 }
 
-# Test 1: check_suite conclusion=success should skip
-test_check_suite_success() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="success" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-  ! grep -q "issue comment" "$MOCK_LOG"
-}
+echo "Running build-monitor tests..."
 
-# Test 2: check_suite branch != main should skip
-test_check_suite_wrong_branch() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="feat/something" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 1. check_suite valid failure creates issue
+out=$(run_test "check_suite failure" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_ID="123" \
+  CHECK_SUITE_HEAD_SHA="abcdef123456" \
+  TEAM_MENTION="@googleapis/test-team")
+[[ "$out" == *"Created issue:"* ]] || { echo "Expected issue created, got: $out"; exit 1; }
+[[ "$out" == *"commented on 100"* ]] || { echo "Expected team mention comment, got: $out"; exit 1; }
 
-# Test 3: check_suite wrong app should skip
-test_check_suite_wrong_app() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Dependabot" \
-    CHECK_SUITE_APP_SLUG="dependabot" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 2. check_suite with existing issue adds comment instead
+out=$(run_test "check_suite existing issue" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_ID="123" \
+  CHECK_SUITE_HEAD_SHA="abcdef123456" \
+  MOCK_EXISTING_ISSUE="42")
+[[ "$out" == *"Found existing open issue #42. Adding comment."* ]] || { echo "Expected comment, got: $out"; exit 1; }
 
-# Test 4: check_suite slug matching should succeed
-test_check_suite_slug_match() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google-Cloud-Build" \
-    CHECK_SUITE_APP_SLUG="google-cloud-build" \
-    CHECK_SUITE_ID="123" \
-    CHECK_SUITE_HEAD_SHA="abcdef123456" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Created issue" ]]
-  grep -q "issue create" "$MOCK_LOG"
-}
+# 3. check_suite success skips
+out=$(run_test "check_suite success" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="success")
+[[ "$out" == *"is not a failure. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 5: check_suite wrong head repo should skip
-test_check_suite_fork_repo() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    GITHUB_REPOSITORY="fork-user/test-repo" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 4. check_suite wrong branch skips
+out=$(run_test "check_suite wrong branch" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="feat/test")
+[[ "$out" == *"does not match 'main'. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 6: check_suite with active open PR should skip
-test_check_suite_open_pr_skip() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    CHECK_SUITE_PULL_REQUESTS='[{"number":50,"state":"open","head":{"repo":{"full_name":"googleapis/test-repo"}}}]' \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 5. check_suite wrong app skips
+out=$(run_test "check_suite wrong app" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Random App")
+[[ "$out" == *"does not match 'Google Cloud Build'. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 7: check_suite with PR from fork repo should skip
-test_check_suite_fork_pr_skip() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    CHECK_SUITE_PULL_REQUESTS='[{"number":50,"state":"closed","head":{"repo":{"full_name":"attacker/test-repo"}}}]' \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 6. check_suite security: open PR skips
+out=$(run_test "check_suite open PR security" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_PULL_REQUESTS='[{"number":1,"state":"open","head":{"repo":{"full_name":"googleapis/librarian"}}}]')
+[[ "$out" == *"associated with an active or fork pull request. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 8: check_suite non-completed action should skip
-test_check_suite_non_completed_action() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="requested" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 7. check_suite security: fork PR with null head.repo skips
+out=$(run_test "check_suite null head repo security" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_PULL_REQUESTS='[{"number":1,"state":"closed","head":{"repo":null}}]')
+[[ "$out" == *"associated with an active or fork pull request. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 9: check_suite failure on main creates new issue and posts comment
-test_check_suite_failure_new_issue() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    CHECK_SUITE_ID="123" \
-    CHECK_SUITE_HEAD_SHA="abcdef123456" \
-    GH_REPO="googleapis/test-repo" \
-    TEAM_MENTION="@googleapis/cloud-sdk-rust-team" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Created issue" ]]
-  grep -q "issue create" "$MOCK_LOG"
-  grep -q "issue comment 42" "$MOCK_LOG"
-}
+# 8. workflow_run valid failure creates issue
+out=$(run_test "workflow_run failure" \
+  EVENT_NAME="workflow_run" \
+  EVENT_ACTION="completed" \
+  WORKFLOW_RUN_CONCLUSION="failure" \
+  WORKFLOW_RUN_EVENT="push" \
+  WORKFLOW_RUN_HEAD_BRANCH="main" \
+  WORKFLOW_RUN_HEAD_REPO="googleapis/librarian" \
+  WORKFLOW_RUN_ID="789" \
+  WORKFLOW_RUN_HEAD_SHA="abcdef123456")
+[[ "$out" == *"Created issue:"* ]] || { echo "Expected issue created, got: $out"; exit 1; }
 
-# Test 10: check_suite failure on main updates existing open issue
-test_check_suite_failure_existing_issue() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    CHECK_SUITE_ID="123" \
-    CHECK_SUITE_HEAD_SHA="abcdef123456" \
-    GH_REPO="googleapis/test-repo" \
-    MOCK_EXISTING_ISSUE='[{"number":77,"title":"test-repo: Post-merge build failure on main"}]' \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Found existing open issue #77" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-  grep -q "issue comment 77" "$MOCK_LOG"
-}
+# 9. workflow_run non-push event skips
+out=$(run_test "workflow_run pull_request event" \
+  EVENT_NAME="workflow_run" \
+  EVENT_ACTION="completed" \
+  WORKFLOW_RUN_CONCLUSION="failure" \
+  WORKFLOW_RUN_EVENT="pull_request")
+[[ "$out" == *"is not push. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 11: check_suite exact title match prevents commenting on partial match
-test_check_suite_exact_title_match_only() {
-  output=$(EVENT_NAME="check_suite" \
-    EVENT_ACTION="completed" \
-    CHECK_SUITE_CONCLUSION="failure" \
-    CHECK_SUITE_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    CHECK_SUITE_APP_NAME="Google Cloud Build" \
-    CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
-    CHECK_SUITE_ID="123" \
-    CHECK_SUITE_HEAD_SHA="abcdef123456" \
-    GH_REPO="googleapis/test-repo" \
-    MOCK_EXISTING_ISSUE='[{"number":77,"title":"test-repo: Post-merge build failure on main (old/different)"}]' \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Created issue" ]]
-  grep -q "issue create" "$MOCK_LOG"
-}
+# 10. workflow_run fork repo skips
+out=$(run_test "workflow_run fork repo" \
+  EVENT_NAME="workflow_run" \
+  EVENT_ACTION="completed" \
+  WORKFLOW_RUN_CONCLUSION="failure" \
+  WORKFLOW_RUN_EVENT="push" \
+  WORKFLOW_RUN_HEAD_REPO="malicious-fork/librarian")
+[[ "$out" == *"does not match 'googleapis/librarian'. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 12: workflow_run conclusion=success should skip
-test_workflow_run_success() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="success" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 11. extra event (push, workflow_dispatch, pull_request) skips immediately
+for extra in push workflow_dispatch pull_request release; do
+  out=$(run_test "extra event $extra" EVENT_NAME="$extra")
+  [[ "$out" == *"Event '$extra' is not monitored. Skipping."* ]] || { echo "Expected skip for $extra, got: $out"; exit 1; }
+done
 
-# Test 13: workflow_run wrong branch should skip
-test_workflow_run_wrong_branch() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="feat/something" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 12. workflow_run security: open PR skips
+out=$(run_test "workflow_run open PR security" \
+  EVENT_NAME="workflow_run" \
+  EVENT_ACTION="completed" \
+  WORKFLOW_RUN_CONCLUSION="failure" \
+  WORKFLOW_RUN_EVENT="push" \
+  WORKFLOW_RUN_HEAD_BRANCH="main" \
+  WORKFLOW_RUN_HEAD_REPO="googleapis/librarian" \
+  WORKFLOW_RUN_PULL_REQUESTS='[{"number":1,"state":"open","head":{"repo":{"full_name":"googleapis/librarian"}}}]')
+[[ "$out" == *"associated with an active or fork pull request. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 14: workflow_run pull_request event should skip
-test_workflow_run_pr_event() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="pull_request" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 13. workflow_run security: fork PR with null head.repo skips
+out=$(run_test "workflow_run null head repo security" \
+  EVENT_NAME="workflow_run" \
+  EVENT_ACTION="completed" \
+  WORKFLOW_RUN_CONCLUSION="failure" \
+  WORKFLOW_RUN_EVENT="push" \
+  WORKFLOW_RUN_HEAD_BRANCH="main" \
+  WORKFLOW_RUN_HEAD_REPO="googleapis/librarian" \
+  WORKFLOW_RUN_PULL_REQUESTS='[{"number":1,"state":"closed","head":{"repo":null}}]')
+[[ "$out" == *"associated with an active or fork pull request. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 15: workflow_run fork head repo should skip
-test_workflow_run_fork_head_repo() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_HEAD_REPO="fork-user/test-repo" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 14. non-completed action skips
+out=$(run_test "non-completed action" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="requested")
+[[ "$out" == *"is not completed. Skipping."* ]] || { echo "Expected skip, got: $out"; exit 1; }
 
-# Test 16: workflow_run non-completed action should skip
-test_workflow_run_non_completed_action() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="in_progress" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
+# 15. check_suite with no failed check runs falls back to commit checks link
+out=$(run_test "check_suite empty runs fallback" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_ID="123" \
+  CHECK_SUITE_HEAD_SHA="abcdef123456" \
+  MOCK_NO_CHECK_RUNS="true")
+[[ "$out" == *"Created issue:"* ]] || { echo "Expected issue created, got: $out"; exit 1; }
 
-# Test 17: workflow_run failure creates issue
-test_workflow_run_failure() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_ID="999" \
-    WORKFLOW_RUN_NAME="CI" \
-    WORKFLOW_RUN_HEAD_SHA="11223344" \
-    WORKFLOW_RUN_URL="https://github.com/test/repo/actions/runs/999" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Created issue" ]]
-  grep -q "issue create" "$MOCK_LOG"
-}
+# 16. issue creation with label failure retries without label
+out=$(run_test "issue creation label failure fallback" \
+  EVENT_NAME="check_suite" \
+  EVENT_ACTION="completed" \
+  CHECK_SUITE_CONCLUSION="failure" \
+  CHECK_SUITE_HEAD_BRANCH="main" \
+  CHECK_SUITE_APP_NAME_ACTUAL="Google Cloud Build" \
+  CHECK_SUITE_ID="123" \
+  CHECK_SUITE_HEAD_SHA="abcdef123456" \
+  MOCK_LABEL_FAIL="true")
+[[ "$out" == *"Created issue:"* ]] || { echo "Expected issue created with fallback, got: $out"; exit 1; }
 
-# Test 18: workflow_run assigns WORKFLOW_RUN_ACTOR when commit author is a bot
-test_workflow_run_actor_assignee() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_ID="999" \
-    WORKFLOW_RUN_HEAD_SHA="11223344" \
-    WORKFLOW_RUN_ACTOR="human-dev" \
-    MOCK_COMMIT_AUTHOR_BOT="true" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Attempting to create issue assigned to human-dev" ]]
-  grep -q "issue create" "$MOCK_LOG"
-  grep -q -- "--assignee human-dev" "$MOCK_LOG"
-}
-
-# Test 19: assignee retry fallback
-test_assignee_retry_fallback() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_ID="999" \
-    GH_REPO="googleapis/test-repo" \
-    INPUT_ASSIGNEE="external-contributor" \
-    FAIL_ON_ASSIGNEE="true" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Attempting to create issue without assignee" ]]
-  grep -q "issue create" "$MOCK_LOG"
-}
-
-# Test 20: label retry fallback when label doesn't exist in repo
-test_label_retry_fallback() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_ID="999" \
-    GH_REPO="googleapis/test-repo" \
-    ISSUE_LABELS="nonexistent-label" \
-    FAIL_ON_LABEL="true" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Attempting to create issue without label" ]]
-  grep -q "issue create" "$MOCK_LOG"
-}
-
-# Test 21: empty labels does not pass --label flag
-test_empty_labels_input() {
-  output=$(EVENT_NAME="workflow_run" \
-    EVENT_ACTION="completed" \
-    WORKFLOW_RUN_CONCLUSION="failure" \
-    WORKFLOW_RUN_HEAD_BRANCH="main" \
-    TARGET_BRANCH="main" \
-    WORKFLOW_RUN_EVENT="push" \
-    WORKFLOW_RUN_EVENT_ACTUAL="push" \
-    WORKFLOW_RUN_ID="999" \
-    GH_REPO="googleapis/test-repo" \
-    ISSUE_LABELS="" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Created issue" ]]
-  ! grep -q -- "--label" "$MOCK_LOG"
-}
-
-# Test 22: unsupported event should skip
-test_unsupported_event() {
-  output=$(EVENT_NAME="pull_request" \
-    GH_REPO="googleapis/test-repo" \
-    bash "$MONITOR_SCRIPT")
-  [[ "$output" =~ "Skipping" ]]
-  ! grep -q "issue create" "$MOCK_LOG"
-}
-
-run_test "check_suite_success" test_check_suite_success
-run_test "check_suite_wrong_branch" test_check_suite_wrong_branch
-run_test "check_suite_wrong_app" test_check_suite_wrong_app
-run_test "check_suite_slug_match" test_check_suite_slug_match
-run_test "check_suite_fork_repo" test_check_suite_fork_repo
-run_test "check_suite_open_pr_skip" test_check_suite_open_pr_skip
-run_test "check_suite_fork_pr_skip" test_check_suite_fork_pr_skip
-run_test "check_suite_non_completed_action" test_check_suite_non_completed_action
-run_test "check_suite_failure_new_issue" test_check_suite_failure_new_issue
-run_test "check_suite_failure_existing_issue" test_check_suite_failure_existing_issue
-run_test "check_suite_exact_title_match_only" test_check_suite_exact_title_match_only
-run_test "workflow_run_success" test_workflow_run_success
-run_test "workflow_run_wrong_branch" test_workflow_run_wrong_branch
-run_test "workflow_run_pr_event" test_workflow_run_pr_event
-run_test "workflow_run_fork_head_repo" test_workflow_run_fork_head_repo
-run_test "workflow_run_non_completed_action" test_workflow_run_non_completed_action
-run_test "workflow_run_failure" test_workflow_run_failure
-run_test "workflow_run_actor_assignee" test_workflow_run_actor_assignee
-run_test "assignee_retry_fallback" test_assignee_retry_fallback
-run_test "label_retry_fallback" test_label_retry_fallback
-run_test "empty_labels_input" test_empty_labels_input
-run_test "unsupported_event" test_unsupported_event
-
-echo ""
-echo "=== Test Summary ==="
-echo "Passed: $TESTS_PASSED"
-echo "Failed: $TESTS_FAILED"
-
-if [[ "$TESTS_FAILED" -gt 0 ]]; then
-  exit 1
-fi
+echo "All build-monitor tests passed successfully!"

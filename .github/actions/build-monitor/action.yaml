@@ -30,18 +30,10 @@ inputs:
     description: "Comma-separated list of labels to apply to the issue."
     required: false
     default: ":rotating_light: critical"
-  assignee:
-    description: "The GitHub username to assign the issue to. Defaults to commit author or actor."
-    required: false
-    default: ""
   check_suite_app_name:
     description: "The GitHub App name to filter on for check_suite events (default: Google Cloud Build)."
     required: false
     default: "Google Cloud Build"
-  workflow_run_event:
-    description: "The trigger event to filter on for workflow_run events (default: push)."
-    required: false
-    default: "push"
   repo:
     description: "The target repository in owner/repo format."
     required: false
@@ -53,37 +45,28 @@ runs:
       shell: bash
       run: bash "${{ github.action_path }}/build-monitor.sh"
       env:
-        GITHUB_TOKEN: ${{ github.token }}
         GH_TOKEN: ${{ github.token }}
+        GITHUB_TOKEN: ${{ github.token }}
         GH_REPO: ${{ inputs.repo }}
         TARGET_BRANCH: ${{ inputs.target_branch }}
         TEAM_MENTION: ${{ inputs.team_mention }}
-        INPUT_ISSUE_TITLE: ${{ inputs.issue_title }}
+        ISSUE_TITLE_INPUT: ${{ inputs.issue_title }}
         ISSUE_LABELS: ${{ inputs.labels }}
-        INPUT_ASSIGNEE: ${{ inputs.assignee }}
         CHECK_SUITE_APP_NAME: ${{ inputs.check_suite_app_name }}
-        WORKFLOW_RUN_EVENT: ${{ inputs.workflow_run_event }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_ACTION: ${{ github.event.action }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_SERVER_URL: ${{ github.server_url }}
-        GITHUB_RUN_ID: ${{ github.run_id }}
-        GITHUB_SHA: ${{ github.sha }}
         CHECK_SUITE_ID: ${{ github.event.check_suite.id }}
         CHECK_SUITE_HEAD_BRANCH: ${{ github.event.check_suite.head_branch }}
         CHECK_SUITE_HEAD_SHA: ${{ github.event.check_suite.head_sha }}
         CHECK_SUITE_APP_NAME_ACTUAL: ${{ github.event.check_suite.app.name }}
-        CHECK_SUITE_APP_SLUG: ${{ github.event.check_suite.app.slug }}
         CHECK_SUITE_CONCLUSION: ${{ github.event.check_suite.conclusion }}
-        CHECK_SUITE_URL: ${{ github.event.check_suite.url }}
         CHECK_SUITE_PULL_REQUESTS: ${{ toJson(github.event.check_suite.pull_requests) }}
         WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
         WORKFLOW_RUN_NAME: ${{ github.event.workflow_run.name }}
         WORKFLOW_RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         WORKFLOW_RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-        WORKFLOW_RUN_EVENT_ACTUAL: ${{ github.event.workflow_run.event }}
+        WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
         WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         WORKFLOW_RUN_URL: ${{ github.event.workflow_run.html_url }}
         WORKFLOW_RUN_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
-        WORKFLOW_RUN_ACTOR: ${{ github.event.workflow_run.actor.login }}
         WORKFLOW_RUN_PULL_REQUESTS: ${{ toJson(github.event.workflow_run.pull_requests) }}
