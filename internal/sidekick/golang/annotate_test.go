@@ -593,3 +593,248 @@ func TestAnnotateRun(t *testing.T) {
 		t.Errorf("expected SnippetDescription %q, got %q", wantDelDesc, delMAnn.SnippetDescription)
 	}
 }
+
+func TestComputeHelpersImportsGating(t *testing.T) {
+	// When HasREST is true, all HTTP and gRPC imports must be present.
+	restImports := computeHelpersImports(true)
+	if len(restImports.Standard) != 5 {
+		t.Errorf("expected 5 standard imports when HasREST=true, got %d: %v", len(restImports.Standard), restImports.Standard)
+	}
+	if len(restImports.ThirdParty) != 7 {
+		t.Errorf("expected 7 third-party imports when HasREST=true, got %d: %v", len(restImports.ThirdParty), restImports.ThirdParty)
+	}
+
+	var restStdPaths []string
+	for _, imp := range restImports.Standard {
+		restStdPaths = append(restStdPaths, imp.Path)
+	}
+	for _, want := range []string{"context", "fmt", "io", "log/slog", "net/http"} {
+		if !slices.Contains(restStdPaths, want) {
+			t.Errorf("expected standard imports to contain %q, got %v", want, restStdPaths)
+		}
+	}
+
+	var restThirdPaths []string
+	for _, imp := range restImports.ThirdParty {
+		restThirdPaths = append(restThirdPaths, imp.Path)
+	}
+	for _, want := range []string{
+		"github.com/googleapis/gax-go/v2/internallog",
+		"github.com/googleapis/gax-go/v2/internallog/grpclog",
+		"google.golang.org/api/googleapi",
+		"google.golang.org/api/option",
+		"google.golang.org/grpc",
+		"google.golang.org/protobuf/proto",
+		"google.golang.org/protobuf/runtime/protoimpl",
+	} {
+		if !slices.Contains(restThirdPaths, want) {
+			t.Errorf("expected third-party imports to contain %q, got %v", want, restThirdPaths)
+		}
+	}
+
+	// When HasREST is false, HTTP imports (net/http, googleapi, io, internallog) must be omitted.
+	noRestImports := computeHelpersImports(false)
+	if len(noRestImports.Standard) != 3 {
+		t.Errorf("expected 3 standard imports when HasREST=false, got %d: %v", len(noRestImports.Standard), noRestImports.Standard)
+	}
+	if len(noRestImports.ThirdParty) != 5 {
+		t.Errorf("expected 5 third-party imports when HasREST=false, got %d: %v", len(noRestImports.ThirdParty), noRestImports.ThirdParty)
+	}
+
+	var noRestStdPaths []string
+	for _, imp := range noRestImports.Standard {
+		noRestStdPaths = append(noRestStdPaths, imp.Path)
+	}
+	if slices.Contains(noRestStdPaths, "io") || slices.Contains(noRestStdPaths, "net/http") {
+		t.Errorf("unexpected HTTP standard imports in no-REST imports: %v", noRestStdPaths)
+	}
+
+	var noRestThirdPaths []string
+	for _, imp := range noRestImports.ThirdParty {
+		noRestThirdPaths = append(noRestThirdPaths, imp.Path)
+	}
+	if slices.Contains(noRestThirdPaths, "github.com/googleapis/gax-go/v2/internallog") {
+		t.Errorf("unexpected internallog in no-REST imports: %v", noRestThirdPaths)
+	}
+	if slices.Contains(noRestThirdPaths, "google.golang.org/api/googleapi") {
+		t.Errorf("unexpected googleapi in no-REST imports: %v", noRestThirdPaths)
+	}
+	if !slices.Contains(noRestThirdPaths, "github.com/googleapis/gax-go/v2/internallog/grpclog") {
+		t.Errorf("expected grpclog to be retained in no-REST imports: %v", noRestThirdPaths)
+	}
+}
+
+func TestAnnotateModelTransportAndExportClientInfo(t *testing.T) {
+	tests := []struct {
+		name                          string
+		codec                         map[string]string
+		wantModelHasREST              bool
+		wantModelHasGRPC              bool
+		wantServiceHasREST            bool
+		wantServiceHasGRPC            bool
+		wantExportSetGoogleClientInfo bool
+	}{
+		{
+			name:                          "default (both transports)",
+			codec:                         map[string]string{},
+			wantModelHasREST:              true,
+			wantModelHasGRPC:              true,
+			wantServiceHasREST:            true,
+			wantServiceHasGRPC:            true,
+			wantExportSetGoogleClientInfo: false,
+		},
+		{
+			name: "grpc only transport",
+			codec: map[string]string{
+				"transport": "grpc",
+			},
+			wantModelHasREST:              false,
+			wantModelHasGRPC:              true,
+			wantServiceHasREST:            false,
+			wantServiceHasGRPC:            true,
+			wantExportSetGoogleClientInfo: false,
+		},
+		{
+			name: "rest only transport",
+			codec: map[string]string{
+				"transport": "rest",
+			},
+			wantModelHasREST:              true,
+			wantModelHasGRPC:              false,
+			wantServiceHasREST:            true,
+			wantServiceHasGRPC:            false,
+			wantExportSetGoogleClientInfo: false,
+		},
+		{
+			name: "diregapic forces rest only",
+			codec: map[string]string{
+				"diregapic": "true",
+			},
+			wantModelHasREST:              true,
+			wantModelHasGRPC:              false,
+			wantServiceHasREST:            true,
+			wantServiceHasGRPC:            false,
+			wantExportSetGoogleClientInfo: false,
+		},
+		{
+			name: "explicit grpc,rest",
+			codec: map[string]string{
+				"transport": "grpc,rest",
+			},
+			wantModelHasREST:              true,
+			wantModelHasGRPC:              true,
+			wantServiceHasREST:            true,
+			wantServiceHasGRPC:            true,
+			wantExportSetGoogleClientInfo: false,
+		},
+		{
+			name: "export set google client info feature flag enabled",
+			codec: map[string]string{
+				"F_export_set_google_client_info": "true",
+			},
+			wantModelHasREST:              true,
+			wantModelHasGRPC:              true,
+			wantServiceHasREST:            true,
+			wantServiceHasGRPC:            true,
+			wantExportSetGoogleClientInfo: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &api.API{
+				Name: "sample",
+				Services: []*api.Service{
+					{
+						Name:        "SampleService",
+						DefaultHost: "sample.googleapis.com",
+					},
+				},
+			}
+			cfg := &parser.ModelConfig{
+				Codec: tc.codec,
+			}
+
+			mAnn, err := AnnotateModel(model, cfg)
+			if err != nil {
+				t.Fatalf("AnnotateModel failed: %v", err)
+			}
+
+			if mAnn.HasREST != tc.wantModelHasREST {
+				t.Errorf("ModelAnnotation.HasREST = %v, want %v", mAnn.HasREST, tc.wantModelHasREST)
+			}
+			if mAnn.HasGRPC != tc.wantModelHasGRPC {
+				t.Errorf("ModelAnnotation.HasGRPC = %v, want %v", mAnn.HasGRPC, tc.wantModelHasGRPC)
+			}
+
+			if len(model.Services) == 0 {
+				t.Fatalf("no services in model")
+			}
+			sAnn, ok := model.Services[0].Codec.(*ServiceAnnotation)
+			if !ok || sAnn == nil {
+				t.Fatalf("service Codec is not *ServiceAnnotation")
+			}
+
+			if sAnn.HasREST != tc.wantServiceHasREST {
+				t.Errorf("ServiceAnnotation.HasREST = %v, want %v", sAnn.HasREST, tc.wantServiceHasREST)
+			}
+			if sAnn.HasGRPC != tc.wantServiceHasGRPC {
+				t.Errorf("ServiceAnnotation.HasGRPC = %v, want %v", sAnn.HasGRPC, tc.wantServiceHasGRPC)
+			}
+			if sAnn.HasExportSetGoogleClientInfo != tc.wantExportSetGoogleClientInfo {
+				t.Errorf("ServiceAnnotation.HasExportSetGoogleClientInfo = %v, want %v", sAnn.HasExportSetGoogleClientInfo, tc.wantExportSetGoogleClientInfo)
+			}
+		})
+	}
+}
+
+func TestExtractQueryParamsCycleDetection(t *testing.T) {
+	nodeMsg := &api.Message{
+		Name: "Node",
+		ID:   ".test.Node",
+		Fields: []*api.Field{
+			{
+				Name:     "val",
+				JSONName: "val",
+				Typez:    api.TypezString,
+			},
+			{
+				Name:     "next",
+				JSONName: "next",
+				Typez:    api.TypezMessage,
+				TypezID:  ".test.Node",
+			},
+		},
+	}
+
+	model := &api.API{
+		Name: "testapi",
+		Messages: []*api.Message{
+			nodeMsg,
+		},
+	}
+
+	m := &api.Method{
+		Name:      "GetNode",
+		InputType: nodeMsg,
+		PathInfo: &api.PathInfo{
+			Bindings: []*api.PathBinding{
+				{
+					Verb: "GET",
+					PathTemplate: &api.PathTemplate{
+						Segments: []api.PathSegment{
+							{
+								Literal: "v1",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	params := extractQueryParams(m, model)
+	if !slices.Contains(params, "val") {
+		t.Errorf("expected params to contain %q, got: %v", "val", params)
+	}
+}

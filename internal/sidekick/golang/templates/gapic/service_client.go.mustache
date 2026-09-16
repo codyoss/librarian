@@ -186,6 +186,18 @@ func (c *{{Codec.ClientName}}) Close() error {
 func (c *{{Codec.ClientName}}) setGoogleClientInfo(keyval ...string) {
 	c.internalClient.setGoogleClientInfo(keyval...)
 }
+{{#Codec.HasExportSetGoogleClientInfo}}
+
+// SetGoogleClientInfo sets the name and version of the application in
+// the `x-goog-api-client` header passed on each request. Intended for
+// use by Google-written clients.
+//
+// SetGoogleClientInfo is not concurrency-safe and should only be invoked
+// sequentially before concurrent operations begin.
+func (c *{{Codec.ClientName}}) SetGoogleClientInfo(keyval ...string) {
+	c.setGoogleClientInfo(keyval...)
+}
+{{/Codec.HasExportSetGoogleClientInfo}}
 
 // Connection returns a connection to the API service.
 //

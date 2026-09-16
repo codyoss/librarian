@@ -196,6 +196,8 @@ type ServiceAnnotation struct {
 	HasREST bool
 	HasGRPC bool
 
+	HasExportSetGoogleClientInfo bool
+
 	Imports FileImports
 
 	CopyrightYear    string
@@ -413,6 +415,18 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		releaseLevel = cfg.Codec["release-level"]
 	}
 
+	hasREST := true
+	hasGRPC := true
+	if cfg != nil && cfg.Codec != nil {
+		trans := cfg.Codec["transport"]
+		dire := cfg.Codec["diregapic"] == "true"
+		if trans == "grpc" {
+			hasREST = false
+		} else if trans == "rest" || dire {
+			hasGRPC = false
+		}
+	}
+
 	ann := &ModelAnnotation{
 		PackageName:       clientPkg,
 		ImportPath:        importPath,
@@ -424,8 +438,8 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		IsDeprecated:      releaseLevel == "deprecated",
 		DefaultAuthScopes: descInfo.OAuthScopes,
 		Services:          model.Services,
-		HasREST:           true,
-		HasGRPC:           true,
+		HasREST:           hasREST,
+		HasGRPC:           hasGRPC,
 	}
 	if svcConfig != nil && svcConfig.Name != "" {
 		ann.ServiceName = svcConfig.Name
@@ -449,7 +463,7 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 	ann.Iterators = collectIterators(model.Services, descInfo)
 
 	ann.DocImports = PartitionImports(nil)
-	ann.HelpersImports = computeHelpersImports()
+	ann.HelpersImports = computeHelpersImports(ann.HasREST)
 	ann.AuxiliaryImports = computeAuxiliaryImports(ann.OperationWrappers, ann.Iterators, descInfo)
 
 	ann.MetadataServices = buildMetadataServices(model.Services)
@@ -577,23 +591,31 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 
 	opOverride := getOperationPathOverride(svcConfig, s.Package)
 
+	hasExportSetGoogleClientInfo := false
+	if cfg != nil && cfg.Codec != nil {
+		if cfg.Codec["F_export_set_google_client_info"] == "true" {
+			hasExportSetGoogleClientInfo = true
+		}
+	}
+
 	sAnn := &ServiceAnnotation{
-		Model:                   mAnn,
-		ShortName:               reducedName,
-		RawShortName:            rawShortName,
-		ClientName:              clientName,
-		InternalClientInterface: internalInterface,
-		GRPCClientName:          grpcClientName,
-		RESTClientName:          restClientName,
-		CallOptionsName:         callOptionsName,
-		DefaultCallOptionsName:  defaultCallOptionsName,
-		FileName:                fileName,
-		Methods:                 methods,
-		InternalLROBuilders:     internalLROBuilders,
-		Doc:                     FormatServiceDoc(clientName, s.Documentation),
-		HasLRO:                  hasLRO,
-		HasREST:                 true,
-		HasGRPC:                 true,
+		Model:                        mAnn,
+		ShortName:                    reducedName,
+		RawShortName:                 rawShortName,
+		ClientName:                   clientName,
+		InternalClientInterface:      internalInterface,
+		GRPCClientName:               grpcClientName,
+		RESTClientName:               restClientName,
+		CallOptionsName:              callOptionsName,
+		DefaultCallOptionsName:       defaultCallOptionsName,
+		FileName:                     fileName,
+		Methods:                      methods,
+		InternalLROBuilders:          internalLROBuilders,
+		Doc:                          FormatServiceDoc(clientName, s.Documentation),
+		HasLRO:                       hasLRO,
+		HasREST:                      mAnn.HasREST,
+		HasGRPC:                      mAnn.HasGRPC,
+		HasExportSetGoogleClientInfo: hasExportSetGoogleClientInfo,
 
 		CopyrightYear:               mAnn.CopyrightYear,
 		PackageName:                 clientPkg,
@@ -797,8 +819,8 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 			if firstBinding.PathTemplate != nil {
 				mAnn.HTTPPath = firstBinding.PathTemplate.FlatPath()
 			}
+			mAnn.QueryParams = extractQueryParams(m, model)
 		}
-		mAnn.QueryParams = extractQueryParams(m, model)
 		mAnn.BodyField = m.PathInfo.BodyFieldPath
 	}
 
@@ -1033,7 +1055,7 @@ func resolveFieldGoType(f *api.Field, descInfo *DescriptorInfo) (string, string,
 }
 
 func extractQueryParams(m *api.Method, model *api.API) []string {
-	if m.InputType == nil {
+	if m.InputType == nil || m.PathInfo == nil || len(m.PathInfo.Bindings) == 0 {
 		return nil
 	}
 
@@ -1058,11 +1080,15 @@ func extractQueryParams(m *api.Method, model *api.API) []string {
 	}
 
 	var params []string
-	var walkMsg func(prefix string, msg *api.Message)
-	walkMsg = func(prefix string, msg *api.Message) {
-		if msg == nil {
+	visited := make(map[string]bool)
+	var walkMsg func(prefix string, msg *api.Message, depth int)
+	walkMsg = func(prefix string, msg *api.Message, depth int) {
+		if msg == nil || depth > 8 || visited[msg.ID] {
 			return
 		}
+		visited[msg.ID] = true
+		defer func() { visited[msg.ID] = false }()
+
 		for _, f := range msg.Fields {
 			jsonName := f.JSONName
 			if jsonName == "" {
@@ -1082,7 +1108,7 @@ func extractQueryParams(m *api.Method, model *api.API) []string {
 			if f.Typez == api.TypezMessage && !f.Repeated {
 				subMsg := model.Message(f.TypezID)
 				if subMsg != nil {
-					walkMsg(fullPath, subMsg)
+					walkMsg(fullPath, subMsg, depth+1)
 					continue
 				}
 			}
@@ -1090,7 +1116,7 @@ func extractQueryParams(m *api.Method, model *api.API) []string {
 		}
 	}
 
-	walkMsg("", m.InputType)
+	walkMsg("", m.InputType, 0)
 	sort.Strings(params)
 	return params
 }
@@ -1353,20 +1379,24 @@ func buildMetadataServices(services []*api.Service) []*MetadataService {
 	return metaServices
 }
 
-func computeHelpersImports() FileImports {
+func computeHelpersImports(hasREST bool) FileImports {
 	imports := []ImportSpec{
 		{Path: "context"},
 		{Path: "fmt"},
-		{Path: "io"},
 		{Path: "log/slog"},
-		{Path: "net/http"},
-		{Path: "github.com/googleapis/gax-go/v2/internallog"},
 		{Path: "github.com/googleapis/gax-go/v2/internallog/grpclog"},
-		{Path: "google.golang.org/api/googleapi"},
 		{Path: "google.golang.org/api/option"},
 		{Path: "google.golang.org/grpc"},
 		{Path: "google.golang.org/protobuf/proto"},
 		{Path: "google.golang.org/protobuf/runtime/protoimpl"},
+	}
+	if hasREST {
+		imports = append(imports,
+			ImportSpec{Path: "io"},
+			ImportSpec{Path: "net/http"},
+			ImportSpec{Path: "github.com/googleapis/gax-go/v2/internallog"},
+			ImportSpec{Path: "google.golang.org/api/googleapi"},
+		)
 	}
 	return PartitionImports(imports)
 }

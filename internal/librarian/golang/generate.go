@@ -246,6 +246,15 @@ func generateNativeGAPIC(ctx context.Context, apiPath string, goAPI *config.GoAP
 		"client-package":  goAPI.ClientPackage,
 		"release-level":   releaseLevel,
 	}
+	if !goAPI.NoMetadata {
+		codecMap["metadata"] = "true"
+	}
+	if goAPI.DIREGAPIC {
+		codecMap["diregapic"] = "true"
+	}
+	if trans := transport(sc); trans != "" {
+		codecMap["transport"] = string(trans)
+	}
 	if !goAPI.NoSnippets {
 		snippetsDir := filepath.Join(outDir, "cloud.google.com", "go", "internal", "generated", "snippets", goAPI.ImportPath)
 		codecMap["snippets-out-dir"] = snippetsDir

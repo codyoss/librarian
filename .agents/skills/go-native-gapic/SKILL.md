@@ -46,6 +46,7 @@ Everything is measured, never assumed. Scripts live in `<workspace>/harness/`.
 
 ```bash
 ./harness/diff.sh run secretmanager   # the oracle: regenerate and diff
+./harness/run-librarian.sh generate run  # safe wrapper with GOMEMLIMIT and timeout
 ./harness/scoreboard.sh               # per-file progress table
 ./harness/focus.sh run services_client.go   # one file at a time
 ./harness/assert-formatted.sh         # output must be a goimports fixed point
@@ -55,6 +56,11 @@ Everything is measured, never assumed. Scripts live in `<workspace>/harness/`.
 
 Read `harness/README.md` before using them. It documents the traps each script
 exists to prevent.
+
+**Never call `harness/bin/librarian` directly.** Always invoke it via
+`./harness/run-librarian.sh` or `./harness/diff.sh`. These enforce
+`GOMEMLIMIT=4GiB` and a 120-second timeout to prevent runaway memory consumption
+and OOM crashes.
 
 ## Concurrency: read this before running anything in parallel
 
@@ -66,7 +72,8 @@ is a spectacularly expensive way to waste time.
 Rules:
 
 1. One worker, one `git worktree`. Create it with `harness/worktree.sh <name>`
-   and point the harness at it with `GCG_OVERRIDE=<path>`.
+   and point the harness at it with `GCG_OVERRIDE=<path>`. Always invoke
+   generation via `./harness/run-librarian.sh` or `./harness/diff.sh`.
 2. Never clone `google-cloud-go`. It is 1.1 GB. Worktrees share the object
    store.
 3. Never leave the tree dirty. Every harness script refuses to run against a
@@ -74,6 +81,8 @@ Rules:
    `git -C <repo> checkout -- . && git -C <repo> clean -fd`.
 4. Prefer hermetic unit tests as the inner loop. Only touch the real oracle when
    you need to confirm.
+5. Strictly adhere to Gate 1 scope (`run`, `secretmanager`). Do not attempt to
+   generate out-of-scope libraries (such as `spanner`) until Gate 1 is green.
 
 ## Settled design decisions
 

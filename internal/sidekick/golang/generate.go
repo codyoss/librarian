@@ -76,6 +76,9 @@ func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.Mo
 			base == "snippet.go.mustache" {
 			continue
 		}
+		if base == "gapic_metadata.json.mustache" && (cfg == nil || cfg.Codec == nil || cfg.Codec["metadata"] != "true") {
+			continue
+		}
 		packageFiles = append(packageFiles, f)
 	}
 	if err := language.GenerateFromModel(outdir, model, provider, packageFiles); err != nil {

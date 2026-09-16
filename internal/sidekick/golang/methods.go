@@ -73,6 +73,10 @@ var (
 		".google.protobuf.FloatValue",
 		".google.protobuf.DoubleValue",
 		".google.protobuf.BoolValue",
+		".google.protobuf.Struct",
+		".google.protobuf.Value",
+		".google.protobuf.ListValue",
+		".google.protobuf.Any",
 	}
 )
 
@@ -342,7 +346,8 @@ func getLeafs(msg *descriptorpb.DescriptorProto, descInfo *DescriptorInfo, exclu
 		return pathsToLeafs
 	}
 
-	var recurse func([]*descriptorpb.FieldDescriptorProto, *descriptorpb.DescriptorProto)
+	visitedMsgs := make(map[string]bool)
+	var recurse func([]*descriptorpb.FieldDescriptorProto, *descriptorpb.DescriptorProto, int)
 
 	handleLeaf := func(field *descriptorpb.FieldDescriptorProto, stack []*descriptorpb.FieldDescriptorProto) {
 		elts := []string{}
@@ -354,7 +359,7 @@ func getLeafs(msg *descriptorpb.DescriptorProto, descInfo *DescriptorInfo, exclu
 		pathsToLeafs[key] = field
 	}
 
-	handleMsg := func(field *descriptorpb.FieldDescriptorProto, stack []*descriptorpb.FieldDescriptorProto) {
+	handleMsg := func(field *descriptorpb.FieldDescriptorProto, stack []*descriptorpb.FieldDescriptorProto, depth int) {
 		if field.GetLabel() == descriptorpb.FieldDescriptorProto_LABEL_REPEATED {
 			return
 		}
@@ -364,27 +369,37 @@ func getLeafs(msg *descriptorpb.DescriptorProto, descInfo *DescriptorInfo, exclu
 		if slices.Contains(stack, field) {
 			return
 		}
+		if depth > 8 {
+			return
+		}
+		typeName := field.GetTypeName()
+		if visitedMsgs[typeName] {
+			return
+		}
+		visitedMsgs[typeName] = true
+		defer func() { visitedMsgs[typeName] = false }()
+
 		if descInfo != nil && descInfo.MessageDescriptors != nil {
-			if subMsg, ok := descInfo.MessageDescriptors[field.GetTypeName()]; ok {
-				recurse(append(stack, field), subMsg)
+			if subMsg, ok := descInfo.MessageDescriptors[typeName]; ok {
+				recurse(append(stack, field), subMsg, depth+1)
 			}
 		}
 	}
 
-	recurse = func(stack []*descriptorpb.FieldDescriptorProto, m *descriptorpb.DescriptorProto) {
-		if m == nil {
+	recurse = func(stack []*descriptorpb.FieldDescriptorProto, m *descriptorpb.DescriptorProto, depth int) {
+		if m == nil || depth > 8 {
 			return
 		}
 		for _, field := range m.GetField() {
 			if field.GetType() == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE && !slices.Contains(wellKnownTypeNames, field.GetTypeName()) {
-				handleMsg(field, stack)
+				handleMsg(field, stack, depth)
 			} else {
 				handleLeaf(field, stack)
 			}
 		}
 	}
 
-	recurse([]*descriptorpb.FieldDescriptorProto{}, msg)
+	recurse([]*descriptorpb.FieldDescriptorProto{}, msg, 0)
 	return pathsToLeafs
 }
 
@@ -676,10 +691,16 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 }
 
 func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnnotation, descInfo *DescriptorInfo) string {
-	var sb strings.Builder
-
+	if !sAnn.HasREST {
+		return ""
+	}
 	mProto := lookupMethodDescriptor(m, descInfo)
 	httpInf := getHTTPInfo(mProto)
+	if httpInf == nil && (m.PathInfo == nil || len(m.PathInfo.Bindings) == 0) {
+		return ""
+	}
+
+	var sb strings.Builder
 
 	verb := "GET"
 	urlStr := ""
