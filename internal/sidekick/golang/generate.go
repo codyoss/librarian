@@ -34,6 +34,11 @@ package golang
 import (
 	"context"
 	"embed"
+	"fmt"
+	"go/format"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/googleapis/librarian/internal/sidekick/api"
 	"github.com/googleapis/librarian/internal/sidekick/language"
@@ -50,6 +55,9 @@ var templates embed.FS
 // convention rather than a constraint, but matching it keeps the call site in
 // internal/librarian/golang uniform with the other languages.
 func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.ModelConfig) error {
+	if _, err := AnnotateModel(model, cfg); err != nil {
+		return err
+	}
 	provider := func(name string) (string, error) {
 		contents, err := templates.ReadFile(name)
 		if err != nil {
@@ -57,6 +65,84 @@ func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.Mo
 		}
 		return string(contents), nil
 	}
-	generatedFiles := language.WalkTemplatesDir(templates, "templates/gapic")
-	return language.GenerateFromModel(outdir, model, provider, generatedFiles)
+	// Stage 1: Generate package-level files (excluding per-service templates).
+	allFiles := language.WalkTemplatesDir(templates, "templates/gapic")
+	var packageFiles []language.GeneratedFile
+	for _, f := range allFiles {
+		base := filepath.Base(f.TemplatePath)
+		if base == "service_client.go.mustache" ||
+			base == "client_example_test.go.mustache" ||
+			base == "client_example_go123_test.go.mustache" ||
+			base == "snippet.go.mustache" {
+			continue
+		}
+		packageFiles = append(packageFiles, f)
+	}
+	if err := language.GenerateFromModel(outdir, model, provider, packageFiles); err != nil {
+		return err
+	}
+
+	// Stage 2: Generate per-service client and example files dynamically.
+	for _, s := range model.Services {
+		sAnn, ok := s.Codec.(*ServiceAnnotation)
+		if !ok || sAnn == nil || sAnn.FileName == "" {
+			continue
+		}
+		gen := language.GeneratedFile{
+			TemplatePath: "templates/gapic/service_client.go.mustache",
+			OutputPath:   sAnn.FileName,
+		}
+		if err := language.GenerateService(outdir, s, provider, gen); err != nil {
+			return err
+		}
+
+		if sAnn.ExampleTestFileName != "" {
+			exGen := language.GeneratedFile{
+				TemplatePath: "templates/gapic/client_example_test.go.mustache",
+				OutputPath:   sAnn.ExampleTestFileName,
+			}
+			if err := language.GenerateService(outdir, s, provider, exGen); err != nil {
+				return err
+			}
+		}
+
+		if sAnn.ExampleGo123TestFileName != "" && len(sAnn.PagedExampleMethods) > 0 {
+			ex123Gen := language.GeneratedFile{
+				TemplatePath: "templates/gapic/client_example_go123_test.go.mustache",
+				OutputPath:   sAnn.ExampleGo123TestFileName,
+			}
+			if err := language.GenerateService(outdir, s, provider, ex123Gen); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Stage 3: Generate snippets if configured.
+	if cfg.Codec["omit-snippets"] != "true" && cfg.Codec["snippets-out-dir"] != "" {
+		if err := GenerateSnippets(model, cfg.Codec["snippets-out-dir"], provider); err != nil {
+			return err
+		}
+	}
+
+	return formatGoFiles(outdir)
+}
+
+func formatGoFiles(outdir string) error {
+	return filepath.WalkDir(outdir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(p, ".go") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		formatted, err := format.Source(b)
+		if err != nil {
+			return fmt.Errorf("failed to format %s: %w", p, err)
+		}
+		return os.WriteFile(p, formatted, 0o644)
+	})
 }

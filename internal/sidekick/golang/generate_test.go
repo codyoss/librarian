@@ -62,7 +62,7 @@ func TestGenerate(t *testing.T) {
 	if err := Generate(t.Context(), model, outDir, cfg); err != nil {
 		t.Fatal(err)
 	}
-	name := path.Join(outDir, "README.md")
+	name := path.Join(outDir, "doc.go")
 	stat, err := os.Stat(name)
 	if err != nil {
 		t.Fatalf("expected %s to be generated: %v", name, err)

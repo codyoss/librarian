@@ -31,6 +31,8 @@ import (
 	"github.com/googleapis/librarian/internal/config"
 	"github.com/googleapis/librarian/internal/filesystem"
 	"github.com/googleapis/librarian/internal/serviceconfig"
+	sidekickgolang "github.com/googleapis/librarian/internal/sidekick/golang"
+	"github.com/googleapis/librarian/internal/sidekick/parser"
 	"github.com/googleapis/librarian/internal/snippetmetadata"
 	"github.com/googleapis/librarian/internal/sources"
 )
@@ -142,6 +144,10 @@ func Generate(ctx context.Context, cfg *config.Config, library *config.Library, 
 	return runInDirWithEnv(ctx, outDir, env, command.Go, "mod", "tidy")
 }
 
+func isNativeGenerator() bool {
+	return os.Getenv("GO_GENERATOR") == "native" || os.Getenv("LIBRARIAN_GO_GENERATOR") == "native"
+}
+
 func generateAPI(ctx context.Context, apiPath string, goAPI *config.GoAPI, pc *config.Protoc, googleapisDir, version, outDir string) error {
 	nestedProtos := goAPI.NestedProtos
 	args := []string{
@@ -154,7 +160,18 @@ func generateAPI(ctx context.Context, apiPath string, goAPI *config.GoAPI, pc *c
 	if goAPI.ProtoAPILevel != "" {
 		args = append(args, "--go_opt=default_api_level="+goAPI.ProtoAPILevel)
 	}
-	if !goAPI.ProtoOnly {
+
+	native := isNativeGenerator()
+	var descFile string
+	if native {
+		descFile = filepath.Join(outDir, "descriptors.pb")
+		args = append(args,
+			"--descriptor_set_out="+descFile,
+			"--include_imports",
+			"--include_source_info",
+			"--retain_options",
+		)
+	} else if !goAPI.ProtoOnly {
 		gapicOpts, err := buildGAPICOpts(apiPath, goAPI, version, googleapisDir)
 		if err != nil {
 			return err
@@ -172,7 +189,108 @@ func generateAPI(ctx context.Context, apiPath string, goAPI *config.GoAPI, pc *c
 	args = append(args, protoFiles...)
 	// We don't have other environment variables to set here; the toolchain is set
 	// in the call to runProtoc.
-	return runProtoc(ctx, pc, args...)
+	if err := runProtoc(ctx, pc, args...); err != nil {
+		return err
+	}
+
+	if native && !goAPI.ProtoOnly {
+		defer os.Remove(descFile)
+		return generateNativeGAPIC(ctx, apiPath, goAPI, pc, googleapisDir, version, outDir, descFile, protoFiles)
+	}
+	return nil
+}
+
+func generateNativeGAPIC(ctx context.Context, apiPath string, goAPI *config.GoAPI, pc *config.Protoc, googleapisDir, version, outDir, descFile string, protoFiles []string) error {
+	sc, err := serviceconfig.Find(googleapisDir, apiPath, config.LanguageGo)
+	if err != nil {
+		return err
+	}
+	var svcConfigRel string
+	if sc != nil {
+		svcConfigRel = sc.ServiceConfig
+	}
+
+	releaseLevel := "ga"
+	if sc != nil {
+		rl := sc.ReleaseLevel(config.LanguageGo, version)
+		switch rl {
+		case "preview":
+			releaseLevel = "beta"
+			if strings.Contains(serviceconfig.ExtractVersion(apiPath), "alpha") {
+				releaseLevel = "alpha"
+			}
+		case "stable":
+			releaseLevel = "ga"
+		default:
+			releaseLevel = rl
+		}
+	}
+
+	importPath := "cloud.google.com/go/" + goAPI.ImportPath
+
+	var genFiles []string
+	for _, pf := range protoFiles {
+		rel, err := filepath.Rel(googleapisDir, pf)
+		if err == nil {
+			genFiles = append(genFiles, rel)
+		} else {
+			genFiles = append(genFiles, pf)
+		}
+	}
+
+	codecMap := map[string]string{
+		"generator":       "native",
+		"descriptor-file": descFile,
+		"copyright-year":  "2026",
+		"import-path":     importPath,
+		"client-package":  goAPI.ClientPackage,
+		"release-level":   releaseLevel,
+	}
+	if !goAPI.NoSnippets {
+		snippetsDir := filepath.Join(outDir, "cloud.google.com", "go", "internal", "generated", "snippets", goAPI.ImportPath)
+		codecMap["snippets-out-dir"] = snippetsDir
+	} else {
+		codecMap["omit-snippets"] = "true"
+	}
+	genFeatures := slices.Clone(goAPI.EnabledGeneratorFeatures)
+	for _, toDelete := range goAPI.DisabledGeneratorFeatures {
+		genFeatures = slices.DeleteFunc(genFeatures, func(feat string) bool {
+			return feat == toDelete
+		})
+	}
+	for _, feat := range genFeatures {
+		codecMap[feat] = "true"
+	}
+
+	modelConfig := &parser.ModelConfig{
+		Language:                  config.LanguageGo,
+		SpecificationFormat:       config.SpecProtobuf,
+		SpecificationSource:       apiPath,
+		ServiceConfig:             svcConfigRel,
+		DescriptorFiles:           descFile,
+		DescriptorFilesToGenerate: strings.Join(genFiles, ","),
+		Source: &sources.SourceConfig{
+			Sources:     &sources.Sources{Googleapis: googleapisDir},
+			ActiveRoots: []string{"googleapis"},
+		},
+		Protoc: pc,
+		Codec:  codecMap,
+	}
+
+	model, err := parser.CreateModel(modelConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create model for native Go GAPIC: %w", err)
+	}
+
+	targetDir := filepath.Join(outDir, "cloud.google.com", "go", goAPI.ImportPath)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+
+	if err := sidekickgolang.Generate(ctx, model, targetDir, modelConfig); err != nil {
+		return fmt.Errorf("failed to generate native Go GAPIC: %w", err)
+	}
+	return nil
 }
 
 func buildGAPICOpts(apiPath string, goAPI *config.GoAPI, version, googleapisDir string) ([]string, error) {
@@ -268,6 +386,9 @@ func moveAndUpdateSnippets(library *config.Library, goAPI *config.GoAPI, srcDir,
 	}
 	snippetDirPrefix := filepath.Join(srcDir, "cloud.google.com", "go", "internal", "generated", "snippets")
 	snippetSrc := filepath.Join(snippetDirPrefix, goAPI.ImportPath)
+	if _, err := os.Stat(snippetSrc); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err := filesystem.MoveAndMerge(snippetSrc, snippetDest); err != nil {
 		return err
 	}
