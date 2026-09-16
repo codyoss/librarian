@@ -88,6 +88,7 @@ limitations under the License.
 //
 // The following is an example of making an API call with the newly created client, mentioned above.
 //
+{{#Codec.DocExample.IsUnary}}
 //	req := &{{Codec.DocExample.ProtoPkg}}.{{Codec.DocExample.RequestType}}{
 //		// TODO: Fill request struct fields.
 //		// See https://pkg.go.dev/{{Codec.DocExample.ProtoImportPath}}#{{Codec.DocExample.RequestType}}.
@@ -98,6 +99,52 @@ limitations under the License.
 //	}
 //	// TODO: Use resp.
 //	_ = resp
+{{/Codec.DocExample.IsUnary}}
+{{#Codec.DocExample.IsLRO}}
+//	req := &{{Codec.DocExample.ProtoPkg}}.{{Codec.DocExample.RequestType}}{
+//		// TODO: Fill request struct fields.
+//		// See https://pkg.go.dev/{{Codec.DocExample.ProtoImportPath}}#{{Codec.DocExample.RequestType}}.
+//	}
+//	op, err := c.{{Codec.DocExample.MethodName}}(ctx, req)
+//	if err != nil {
+//		// TODO: Handle error.
+//	}
+//
+//	resp, err := op.Wait(ctx)
+//	if err != nil {
+//		// TODO: Handle error.
+//	}
+//	// TODO: Use resp.
+//	_ = resp
+{{/Codec.DocExample.IsLRO}}
+{{#Codec.DocExample.IsBidiStream}}
+//	stream, err := c.{{Codec.DocExample.MethodName}}(ctx)
+//	if err != nil {
+//		// TODO: Handle error.
+//	}
+//	go func() {
+//		reqs := []*{{Codec.DocExample.ProtoPkg}}.{{Codec.DocExample.RequestType}}{
+//			// TODO: Create requests.
+//		}
+//		for _, req := range reqs {
+//			if err := stream.Send(req); err != nil {
+//				// TODO: Handle error.
+//			}
+//		}
+//		stream.CloseSend()
+//	}()
+//	for {
+//		resp, err := stream.Recv()
+//		if err == io.EOF {
+//			break
+//		}
+//		if err != nil {
+//			// TODO: handle error.
+//		}
+//		// TODO: Use resp.
+//		_ = resp
+//	}
+{{/Codec.DocExample.IsBidiStream}}
 {{/Codec.DocExample.HasMethod}}
 //
 // # Use of Context

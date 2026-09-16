@@ -73,10 +73,8 @@ var (
 		".google.protobuf.FloatValue",
 		".google.protobuf.DoubleValue",
 		".google.protobuf.BoolValue",
-		".google.protobuf.Struct",
 		".google.protobuf.Value",
 		".google.protobuf.ListValue",
-		".google.protobuf.Any",
 	}
 )
 
@@ -409,7 +407,10 @@ func queryParams(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo
 		return res
 	}
 	info := getHTTPInfo(m)
-	if info == nil || info.body == "*" {
+	if info == nil {
+		info = &httpInfo{}
+	}
+	if info.body == "*" {
 		return res
 	}
 
@@ -521,7 +522,7 @@ func generateQueryStringCode(m *descriptorpb.MethodDescriptorProto, descInfo *De
 }
 
 func generateBaseURLCode(urlStr string, retErr string) string {
-	if !strings.HasPrefix(urlStr, "/") {
+	if urlStr != "" && !strings.HasPrefix(urlStr, "/") {
 		urlStr = "/" + urlStr
 	}
 	fmtStr := urlStr
@@ -565,6 +566,53 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	var sb strings.Builder
 
 	mProto := lookupMethodDescriptor(m, descInfo)
+	grpcStub := resolveGRPCStub(m, sAnn)
+
+	if mAnn.IsBidiStream || mAnn.IsClientStream {
+		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, opts ...gax.CallOption) (%s, error) {\n",
+			sAnn.GRPCClientName, m.Name, mAnn.StreamClientType)
+		sb.WriteString("\tctx = gax.InsertMetadataIntoOutgoingContext(ctx, c.xGoogHeaders...)\n")
+		appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
+		fmt.Fprintf(&sb, "\tvar resp %s\n", mAnn.StreamClientType)
+		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
+			m.Name, m.Name, m.Name)
+		sb.WriteString("\terr := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
+		sb.WriteString("\t\tvar err error\n")
+		fmt.Fprintf(&sb, "\t\tc.logger.DebugContext(ctx, \"api streaming client request\", \"serviceName\", serviceName, \"rpcName\", %q)\n", m.Name)
+		fmt.Fprintf(&sb, "\t\tresp, err = %s.%s(ctx, settings.GRPC...)\n", grpcStub, m.Name)
+		fmt.Fprintf(&sb, "\t\tc.logger.DebugContext(ctx, \"api streaming client response\", \"serviceName\", serviceName, \"rpcName\", %q)\n", m.Name)
+		sb.WriteString("\t\treturn err\n")
+		sb.WriteString("\t}, opts...)\n")
+		sb.WriteString("\tif err != nil {\n")
+		sb.WriteString("\t\treturn nil, err\n")
+		sb.WriteString("\t}\n")
+		sb.WriteString("\treturn resp, nil\n")
+		sb.WriteString("}\n")
+		return sb.String()
+	}
+
+	if mAnn.IsServerStream {
+		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
+			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
+		appendRoutingHeadersGRPC(&sb, m, mProto)
+		appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
+		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
+			m.Name, m.Name, m.Name)
+		fmt.Fprintf(&sb, "\tvar resp %s\n", mAnn.StreamClientType)
+		sb.WriteString("\terr := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
+		sb.WriteString("\t\tvar err error\n")
+		fmt.Fprintf(&sb, "\t\tc.logger.DebugContext(ctx, \"api streaming client request\", \"serviceName\", serviceName, \"rpcName\", %q)\n", m.Name)
+		fmt.Fprintf(&sb, "\t\tresp, err = %s.%s(ctx, req, settings.GRPC...)\n", grpcStub, m.Name)
+		fmt.Fprintf(&sb, "\t\tc.logger.DebugContext(ctx, \"api streaming client response\", \"serviceName\", serviceName, \"rpcName\", %q)\n", m.Name)
+		sb.WriteString("\t\treturn err\n")
+		sb.WriteString("\t}, opts...)\n")
+		sb.WriteString("\tif err != nil {\n")
+		sb.WriteString("\t\treturn nil, err\n")
+		sb.WriteString("\t}\n")
+		sb.WriteString("\treturn resp, nil\n")
+		sb.WriteString("}\n")
+		return sb.String()
+	}
 
 	// Signature
 	switch {
@@ -593,7 +641,6 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		m.Name, m.Name, m.Name)
 
 	// Execution
-	grpcStub := resolveGRPCStub(m, sAnn)
 
 	switch {
 	case mAnn.IsEmpty:
@@ -697,14 +744,14 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	mProto := lookupMethodDescriptor(m, descInfo)
 	httpInf := getHTTPInfo(mProto)
 	if httpInf == nil && (m.PathInfo == nil || len(m.PathInfo.Bindings) == 0) {
-		return ""
+		if mAnn.IsServerStream || mAnn.IsClientStream || mAnn.IsBidiStream {
+			return ""
+		}
 	}
 
 	var sb strings.Builder
 
-	verb := "GET"
-	urlStr := ""
-	bodyField := ""
+	var verb, urlStr, bodyField string
 	if httpInf != nil {
 		verb = httpInf.verb
 		urlStr = httpInf.url
@@ -730,6 +777,14 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString(mAnn.Doc + "\n")
 	}
 
+	if mAnn.IsBidiStream || mAnn.IsClientStream {
+		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, opts ...gax.CallOption) (%s, error) {\n",
+			sAnn.RESTClientName, m.Name, mAnn.StreamClientType)
+		fmt.Fprintf(&sb, "\treturn nil, errors.New(%q)\n", fmt.Sprintf("%s not yet supported for REST clients", m.Name))
+		sb.WriteString("}\n")
+		return sb.String()
+	}
+
 	// Signature
 	switch {
 	case mAnn.IsEmpty:
@@ -741,6 +796,9 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	case mAnn.IsLRO:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
 			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.OperationType)
+	case mAnn.IsServerStream:
+		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
+			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
 	default:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
 			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.ResponseType)
@@ -862,6 +920,79 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	if mAnn.IsUnary {
 		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
 			m.Name, m.Name, m.Name)
+	}
+
+	// Execution
+	if mAnn.IsServerStream {
+		streamClient := fmt.Sprintf("%sRESTStreamClient", lowerFirst(m.Name))
+		fmt.Fprintf(&sb, "\tvar streamClient *%s\n", streamClient)
+		sb.WriteString("\te := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
+		sb.WriteString("\t\tif settings.Path != \"\" {\n")
+		sb.WriteString("\t\t\tbaseUrl.Path = settings.Path\n")
+		sb.WriteString("\t\t}\n")
+		fmt.Fprintf(&sb, "\t\thttpReq, err := http.NewRequest(%q, baseUrl.String(), %s)\n", verb, bodyReader)
+		sb.WriteString("\t\tif err != nil {\n")
+		sb.WriteString("\t\t\treturn err\n")
+		sb.WriteString("\t\t}\n")
+		sb.WriteString("\t\thttpReq = httpReq.WithContext(ctx)\n")
+		sb.WriteString("\t\thttpReq.Header = headers\n\n")
+		fmt.Fprintf(&sb, "\t\thttpRsp, err := executeStreamingHTTPRequest(ctx, c.httpClient, httpReq, c.logger, %s, %q)\n", logBody, m.Name)
+		sb.WriteString("\t\tif err != nil {\n")
+		sb.WriteString("\t\t\treturn err\n")
+		sb.WriteString("\t\t}\n\n")
+		fmt.Fprintf(&sb, "\t\tstreamClient = &%s{\n", streamClient)
+		sb.WriteString("\t\t\tctx:    ctx,\n")
+		sb.WriteString("\t\t\tmd:     metadata.MD(httpRsp.Header),\n")
+		fmt.Fprintf(&sb, "\t\t\tstream: gax.NewProtoJSONStreamReader(httpRsp.Body, (&%s{}).ProtoReflect().Type()),\n", mAnn.ResponseType)
+		sb.WriteString("\t\t}\n")
+		sb.WriteString("\t\treturn nil\n")
+		sb.WriteString("\t}, opts...)\n\n")
+		sb.WriteString("\treturn streamClient, e\n")
+		sb.WriteString("}\n\n")
+
+		fmt.Fprintf(&sb, "// %s is the stream client used to consume the server stream created by\n", streamClient)
+		fmt.Fprintf(&sb, "// the REST implementation of %s.\n", m.Name)
+		fmt.Fprintf(&sb, "type %s struct {\n", streamClient)
+		sb.WriteString("\tctx    context.Context\n")
+		sb.WriteString("\tmd     metadata.MD\n")
+		sb.WriteString("\tstream *gax.ProtoJSONStream\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) Recv() (*%s, error) {\n", streamClient, mAnn.ResponseType)
+		sb.WriteString("\tif err := c.ctx.Err(); err != nil {\n")
+		sb.WriteString("\t\tdefer c.stream.Close()\n")
+		sb.WriteString("\t\treturn nil, err\n")
+		sb.WriteString("\t}\n")
+		sb.WriteString("\tmsg, err := c.stream.Recv()\n")
+		sb.WriteString("\tif err != nil {\n")
+		sb.WriteString("\t\tdefer c.stream.Close()\n")
+		sb.WriteString("\t\treturn nil, err\n")
+		sb.WriteString("\t}\n")
+		fmt.Fprintf(&sb, "\tres := msg.(*%s)\n", mAnn.ResponseType)
+		sb.WriteString("\treturn res, nil\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) Header() (metadata.MD, error) {\n", streamClient)
+		sb.WriteString("\treturn c.md, nil\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) Trailer() metadata.MD {\n", streamClient)
+		sb.WriteString("\treturn c.md\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) CloseSend() error {\n", streamClient)
+		sb.WriteString("\t// This is a no-op to fulfill the interface.\n")
+		sb.WriteString("\treturn errors.New(\"this method is not implemented for a server-stream\")\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) Context() context.Context {\n", streamClient)
+		sb.WriteString("\treturn c.ctx\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) SendMsg(m interface{}) error {\n", streamClient)
+		sb.WriteString("\t// This is a no-op to fulfill the interface.\n")
+		sb.WriteString("\treturn errors.New(\"this method is not implemented for a server-stream\")\n")
+		sb.WriteString("}\n\n")
+		fmt.Fprintf(&sb, "func (c *%s) RecvMsg(m interface{}) error {\n", streamClient)
+		sb.WriteString("\t// This is a no-op to fulfill the interface.\n")
+		sb.WriteString("\treturn errors.New(\"this method is not implemented, use Recv\")\n")
+		sb.WriteString("}\n")
+
+		return sb.String()
 	}
 
 	// Execution
@@ -1101,15 +1232,32 @@ func appendRoutingHeadersREST(sb *strings.Builder, m *api.Method, mProto *descri
 }
 
 func appendTelemetryContext(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto, sAnn *ServiceAnnotation, descInfo *DescriptorInfo, isREST bool) {
-	resTarget := resourceNameField(mProto, descInfo)
-	if resTarget != nil && len(resTarget.FieldNames) > 0 {
-		f := resTarget.FieldNames[0]
-		getter := fmt.Sprintf("req%s", fieldGetter(f))
-		host := sAnn.URLDomain
-		sb.WriteString("\tif gax.IsFeatureEnabled(\"TRACING\") || gax.IsFeatureEnabled(\"LOGGING\") {\n")
-		fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"//%s/%%v\", %s))\n",
-			host, getter)
-		sb.WriteString("\t}\n")
+	hasHeaders := false
+	if mProto != nil {
+		if dynamicRequestHeadersExist(mProto) || len(parseImplicitRequestHeaders(mProto)) > 0 {
+			hasHeaders = true
+		}
+	} else {
+		if m.SourceServiceID == ".google.cloud.location.Locations" && m.Name == "GetLocation" {
+			hasHeaders = true
+		} else if m.SourceServiceID == ".google.longrunning.Operations" && (m.Name == "GetOperation" || m.Name == "WaitOperation" || m.Name == "DeleteOperation") {
+			hasHeaders = true
+		} else if m.SourceServiceID == ".google.iam.v1.IAMPolicy" {
+			hasHeaders = true
+		}
+	}
+
+	if hasHeaders {
+		resTarget := resourceNameField(mProto, descInfo)
+		if resTarget != nil && len(resTarget.FieldNames) > 0 {
+			f := resTarget.FieldNames[0]
+			getter := fmt.Sprintf("req%s", fieldGetter(f))
+			host := sAnn.URLDomain
+			sb.WriteString("\tif gax.IsFeatureEnabled(\"TRACING\") || gax.IsFeatureEnabled(\"LOGGING\") {\n")
+			fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"//%s/%%v\", %s))\n",
+				host, getter)
+			sb.WriteString("\t}\n")
+		}
 	}
 
 	rpcMethod := strings.TrimPrefix(m.SourceServiceID, ".") + "/" + m.Name

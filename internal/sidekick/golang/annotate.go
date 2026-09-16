@@ -44,13 +44,16 @@ import (
 )
 
 var (
-	referenceParser     = regexp.MustCompile(`\[([a-zA-Z0-9._]+)\]\[[a-zA-Z0-9._]*\]`)
+	referenceParser     = regexp.MustCompile(`\[([a-zA-Z0-9._]+)\]\[([a-zA-Z0-9._]*)\]`)
 	mdLinkParser        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	htmlLinkParser      = regexp.MustCompile(`<a\s+href=["']([^"']+)["']>([^<]+)</a>`)
+	bareURLRegex        = regexp.MustCompile(`https?://[^\s)]+`)
 	codeInlineRegex     = regexp.MustCompile("`([^`]+)`")
 	boldRegex           = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	italicRegex         = regexp.MustCompile(`(^|[\s(\[{])\*([a-zA-Z0-9](?:[^*\n]*?[a-zA-Z0-9])?)\*([\s)\]}.,;!?:]|$)`)
 	openQuoteRegex      = regexp.MustCompile(`(^|[\s(\[{])"([^\s])`)
 	closeQuoteRegex     = regexp.MustCompile(`([^\s])"([\s)\]}.,;!?:]|$)`)
+	apostropheRegex     = regexp.MustCompile(`([a-zA-Z])'([a-zA-Z])`)
 	httpPatternVarRegex = regexp.MustCompile(`{([a-zA-Z0-9_.]+?)(=[^{}]+)?}`)
 	headerParamRegexp   = regexp.MustCompile(`{([a-z0-9_.]+?)(=[^{}]+)?}`)
 )
@@ -106,6 +109,10 @@ type DocExampleData struct {
 	ProtoImportPath string
 	RequestType     string
 	MethodName      string
+	IsLRO           bool
+	IsServerStream  bool
+	IsBidiStream    bool
+	IsUnary         bool
 }
 
 // MetadataService represents a service in gapic_metadata.json.
@@ -278,6 +285,10 @@ type MethodAnnotation struct {
 	ResponseType       string
 	IsEmpty            bool
 	IsUnary            bool
+	IsServerStream     bool
+	IsBidiStream       bool
+	IsClientStream     bool
+	StreamClientType   string
 
 	GRPCClientName        string
 	RESTClientName        string
@@ -427,6 +438,23 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		}
 	}
 
+	var scopes []string
+	scopeSet := make(map[string]bool)
+	for _, s := range model.Services {
+		sFQN := "." + s.Package + "." + s.Name
+		sDesc := descInfo.ServiceDescriptors[sFQN]
+		if sDesc == nil {
+			sDesc = descInfo.ServiceDescriptors[strings.TrimPrefix(sFQN, ".")]
+		}
+		if sDesc != nil {
+			extractServiceScopes(sDesc, scopeSet)
+		}
+	}
+	for sc := range scopeSet {
+		scopes = append(scopes, sc)
+	}
+	sort.Strings(scopes)
+
 	ann := &ModelAnnotation{
 		PackageName:       clientPkg,
 		ImportPath:        importPath,
@@ -436,7 +464,7 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		IsAlpha:           releaseLevel == "alpha",
 		IsBeta:            releaseLevel == "beta",
 		IsDeprecated:      releaseLevel == "deprecated",
-		DefaultAuthScopes: descInfo.OAuthScopes,
+		DefaultAuthScopes: scopes,
 		Services:          model.Services,
 		HasREST:           hasREST,
 		HasGRPC:           hasGRPC,
@@ -593,7 +621,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 
 	hasExportSetGoogleClientInfo := false
 	if cfg != nil && cfg.Codec != nil {
-		if cfg.Codec["F_export_set_google_client_info"] == "true" {
+		if cfg.Codec["F_export_set_google_client_info"] == "true" || cfg.Codec["export_set_google_client_info"] == "true" {
 			hasExportSetGoogleClientInfo = true
 		}
 	}
@@ -710,11 +738,19 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	sort.Slice(nativeExampleMethods, func(i, j int) bool {
 		return nativeExampleMethods[i].Name < nativeExampleMethods[j].Name
 	})
+	var allExampleMethods []*api.Method
+	allExampleMethods = append(allExampleMethods, nativeExampleMethods...)
+	allExampleMethods = append(allExampleMethods, mixinLocations...)
+	allExampleMethods = append(allExampleMethods, mixinIAM...)
+	allExampleMethods = append(allExampleMethods, mixinOperations...)
+
 	var exampleMethods []*api.Method
-	exampleMethods = append(exampleMethods, nativeExampleMethods...)
-	exampleMethods = append(exampleMethods, mixinLocations...)
-	exampleMethods = append(exampleMethods, mixinIAM...)
-	exampleMethods = append(exampleMethods, mixinOperations...)
+	for _, m := range allExampleMethods {
+		if m.ClientSideStreaming != m.ServerSideStreaming {
+			continue
+		}
+		exampleMethods = append(exampleMethods, m)
+	}
 
 	var pagedExampleMethods []*api.Method
 	for _, m := range exampleMethods {
@@ -824,7 +860,25 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 		mAnn.BodyField = m.PathInfo.BodyFieldPath
 	}
 
-	mAnn.IsUnary = !mAnn.IsLRO && !mAnn.IsPaged && !mAnn.IsEmpty
+	mAnn.IsServerStream = !m.ClientSideStreaming && m.ServerSideStreaming
+	mAnn.IsBidiStream = m.ClientSideStreaming && m.ServerSideStreaming
+	mAnn.IsClientStream = m.ClientSideStreaming && !m.ServerSideStreaming
+
+	if m.ClientSideStreaming || m.ServerSideStreaming {
+		protoPkg := ""
+		if descInfo != nil && descInfo.PkgByMessage != nil {
+			if imp, ok := descInfo.PkgByMessage[m.InputTypeID]; ok {
+				protoPkg = imp.Name
+			}
+		}
+		mAnn.StreamClientType = fmt.Sprintf("%s.%s_%sClient", protoPkg, s.Name, m.Name)
+		mAnn.HasRetry = false
+		mAnn.RetryTimeout = 0
+		mAnn.HasRetryCodes = false
+		mAnn.HasRESTRetry = (mAnn.RESTRetryTimeout > 0 || mAnn.HasRESTRetryCodes)
+	}
+
+	mAnn.IsUnary = !mAnn.IsLRO && !mAnn.IsPaged && !mAnn.IsEmpty && !mAnn.IsServerStream && !mAnn.IsBidiStream && !mAnn.IsClientStream
 	return mAnn
 }
 
@@ -1128,37 +1182,89 @@ func FormatDocComment(raw string) string {
 		return ""
 	}
 
-	com = referenceParser.ReplaceAllString(com, "$1")
+	com = referenceParser.ReplaceAllStringFunc(com, func(m string) string {
+		sub := referenceParser.FindStringSubmatch(m)
+		if len(sub) == 3 {
+			if strings.HasSuffix(sub[2], ".name") {
+				return fmt.Sprintf("[%s][%s (at http://%s)]", sub[1], sub[2], sub[2])
+			}
+			return sub[1]
+		}
+		return m
+	})
 	com = mdLinkParser.ReplaceAllString(com, "$1 (at $2)")
 	com = htmlLinkParser.ReplaceAllString(com, "$2 (at $1)")
-	com = codeInlineRegex.ReplaceAllString(com, "$1")
-	com = boldRegex.ReplaceAllString(com, "$1")
+
+	var sb strings.Builder
+	lastIdx := 0
+	for _, loc := range bareURLRegex.FindAllStringIndex(com, -1) {
+		start, end := loc[0], loc[1]
+		sb.WriteString(com[lastIdx:start])
+		url := com[start:end]
+		if start >= 4 && com[start-4:start] == "(at " {
+			sb.WriteString(url)
+		} else {
+			sb.WriteString(url + " (at " + url + ")")
+		}
+		lastIdx = end
+	}
+	sb.WriteString(com[lastIdx:])
+	com = sb.String()
+
 	com = openQuoteRegex.ReplaceAllString(com, "$1“$2")
 	com = closeQuoteRegex.ReplaceAllString(com, "$1”$2")
+	com = codeInlineRegex.ReplaceAllString(com, "$1")
+	com = boldRegex.ReplaceAllString(com, "$1")
+	com = italicRegex.ReplaceAllString(com, "$1$2$3")
+	com = apostropheRegex.ReplaceAllString(com, "$1’$2")
+	com = strings.ReplaceAll(com, "--", "–")
 
 	lines := strings.Split(com, "\n")
 	var out []string
 	inList := false
+	currentIndent := ""
 	for _, l := range lines {
 		trimmed := strings.TrimRight(l, " \t\r")
 		trimmedLeft := strings.TrimLeft(trimmed, " \t")
 		if strings.TrimSpace(trimmed) == "" {
 			inList = false
+			currentIndent = ""
 			out = append(out, "//")
 			continue
 		}
 		if strings.HasPrefix(trimmedLeft, "* ") || strings.HasPrefix(trimmedLeft, "- ") {
+			leadingSpaces := len(trimmed) - len(trimmedLeft)
+			indent := "//   "
+			if leadingSpaces >= 4 {
+				indent = "//     "
+			}
 			if inList {
+				if len(out) > 0 && out[len(out)-1] != "//" {
+					out = append(out, "//")
+				}
+			} else {
 				if len(out) > 0 && out[len(out)-1] != "//" {
 					out = append(out, "//")
 				}
 			}
 			inList = true
-			bulletContent := trimmedLeft[2:]
-			out = append(out, "//   "+bulletContent)
+			currentIndent = indent
+			bulletContent := strings.TrimSpace(trimmedLeft[2:])
+			out = append(out, indent+bulletContent)
 			continue
 		}
+		if inList {
+			leadingSpaces := len(trimmed) - len(trimmedLeft)
+			if leadingSpaces >= 2 {
+				out = append(out, currentIndent+strings.TrimSpace(trimmedLeft))
+				continue
+			}
+			if len(out) > 0 && out[len(out)-1] != "//" {
+				out = append(out, "//")
+			}
+		}
 		inList = false
+		currentIndent = ""
 		out = append(out, "// "+trimmed)
 	}
 	return strings.Join(out, "\n")
@@ -1307,6 +1413,16 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 		reqTypeName = reqTypeName[p+1:]
 	}
 
+	isLRO := false
+	isServerStream := false
+	isBidiStream := false
+	if mAnn, ok := exMethod.Codec.(*MethodAnnotation); ok && mAnn != nil {
+		isLRO = mAnn.IsLRO
+		isServerStream = mAnn.IsServerStream
+		isBidiStream = mAnn.IsBidiStream
+	}
+	isUnary := !isLRO && !isServerStream && !isBidiStream
+
 	return DocExampleData{
 		ConstructorName: constructorName,
 		HasMethod:       true,
@@ -1314,6 +1430,10 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 		ProtoImportPath: protoImportPath,
 		RequestType:     reqTypeName,
 		MethodName:      exMethod.Name,
+		IsLRO:           isLRO,
+		IsServerStream:  isServerStream,
+		IsBidiStream:    isBidiStream,
+		IsUnary:         isUnary,
 	}
 }
 
@@ -1355,19 +1475,23 @@ func buildMetadataServices(services []*api.Service) []*MetadataService {
 			return rpcs
 		}
 
-		clients := []*MetadataClient{
-			{
+		var clients []*MetadataClient
+		if sAnn == nil || sAnn.HasGRPC {
+			clients = append(clients, &MetadataClient{
 				Transport:     "grpc",
 				LibraryClient: libClient,
 				RPCs:          makeRPCs(),
-				HasMore:       true,
-			},
-			{
+			})
+		}
+		if sAnn == nil || sAnn.HasREST {
+			clients = append(clients, &MetadataClient{
 				Transport:     "rest",
 				LibraryClient: libClient,
 				RPCs:          makeRPCs(),
-				HasMore:       false,
-			},
+			})
+		}
+		for j, c := range clients {
+			c.HasMore = j < len(clients)-1
 		}
 
 		metaServices = append(metaServices, &MetadataService{
@@ -1497,7 +1621,11 @@ func computeExampleImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo) Fi
 	raw = append(raw, ImportSpec{Path: "context"})
 	raw = append(raw, ImportSpec{Name: sAnn.PackageName, Path: sAnn.ImportPath})
 
+	hasBidi := false
 	for _, m := range sAnn.ExampleMethods {
+		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn.IsBidiStream {
+			hasBidi = true
+		}
 		if descInfo != nil && descInfo.PkgByMessage != nil {
 			if imp, ok := descInfo.PkgByMessage[m.InputTypeID]; ok {
 				raw = append(raw, imp)
@@ -1508,6 +1636,10 @@ func computeExampleImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo) Fi
 				}
 			}
 		}
+	}
+
+	if hasBidi {
+		raw = append(raw, ImportSpec{Path: "io"})
 	}
 
 	if len(sAnn.PagedExampleMethods) > 0 {
@@ -2040,6 +2172,18 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 			ImportSpec{Path: "cloud.google.com/go/longrunning/autogen/longrunningpb", Name: "longrunningpb"},
 			ImportSpec{Path: "go.opentelemetry.io/otel/trace", Name: "trace"},
 		)
+	}
+
+	if sAnn.HasREST {
+		for _, m := range sAnn.Methods {
+			if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn.IsServerStream {
+				raw = append(raw,
+					ImportSpec{Path: "errors"},
+					ImportSpec{Path: "google.golang.org/grpc/metadata"},
+				)
+				break
+			}
+		}
 	}
 
 	return PartitionImports(raw)

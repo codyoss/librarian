@@ -109,7 +109,7 @@ func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.Mo
 			}
 		}
 
-		if sAnn.ExampleGo123TestFileName != "" && len(sAnn.PagedExampleMethods) > 0 {
+		if sAnn.ExampleGo123TestFileName != "" {
 			ex123Gen := language.GeneratedFile{
 				TemplatePath: "templates/gapic/client_example_go123_test.go.mustache",
 				OutputPath:   sAnn.ExampleGo123TestFileName,

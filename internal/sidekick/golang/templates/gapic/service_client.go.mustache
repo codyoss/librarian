@@ -148,6 +148,15 @@ type {{Codec.InternalClientInterface}} interface {
 {{#Codec.IsUnary}}
 	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.ResponseType}}, error)
 {{/Codec.IsUnary}}
+{{#Codec.IsBidiStream}}
+	{{Name}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+{{/Codec.IsBidiStream}}
+{{#Codec.IsClientStream}}
+	{{Name}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+{{/Codec.IsClientStream}}
+{{#Codec.IsServerStream}}
+	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+{{/Codec.IsServerStream}}
 {{/Codec.Methods}}
 }
 
@@ -155,7 +164,7 @@ type {{Codec.InternalClientInterface}} interface {
 // Methods, except Close, may be called concurrently. However, fields must not be modified concurrently with method calls.
 {{#Codec.ServiceDoc}}
 //
-{{Codec.ServiceDoc}}
+{{{Codec.ServiceDoc}}}
 {{/Codec.ServiceDoc}}
 type {{Codec.ClientName}} struct {
 	// The internal transport-dependent client.
@@ -208,7 +217,7 @@ func (c *{{Codec.ClientName}}) Connection() *grpc.ClientConn {
 }
 
 {{#Codec.Methods}}
-{{Codec.Doc}}
+{{{Codec.Doc}}}
 {{#Codec.IsEmpty}}
 func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) error {
 	return c.internalClient.{{Name}}(ctx, req, opts...)
@@ -235,6 +244,21 @@ func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Code
 	return c.internalClient.{{Name}}(ctx, req, opts...)
 }
 {{/Codec.IsUnary}}
+{{#Codec.IsBidiStream}}
+func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Name}}(ctx, opts...)
+}
+{{/Codec.IsBidiStream}}
+{{#Codec.IsClientStream}}
+func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Name}}(ctx, opts...)
+}
+{{/Codec.IsClientStream}}
+{{#Codec.IsServerStream}}
+func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Name}}(ctx, req, opts...)
+}
+{{/Codec.IsServerStream}}
 
 {{/Codec.Methods}}
 // {{Codec.GRPCClientName}} is a client for interacting with {{Codec.APITitle}} over gRPC transport.
@@ -279,7 +303,7 @@ type {{Codec.GRPCClientName}} struct {
 // The returned client must be Closed when it is done being used to clean up its underlying connections.
 {{#Codec.ServiceDoc}}
 //
-{{Codec.ServiceDoc}}
+{{{Codec.ServiceDoc}}}
 {{/Codec.ServiceDoc}}
 func New{{Codec.ClientName}}(ctx context.Context, opts ...option.ClientOption) (*{{Codec.ClientName}}, error) {
 	clientOpts := default{{Codec.ShortName}}GRPCClientOptions()
@@ -411,7 +435,7 @@ type {{Codec.RESTClientName}} struct {
 // New{{Codec.ShortName}}RESTClient creates a new {{Codec.DocLibName}} rest client.
 {{#Codec.ServiceDoc}}
 //
-{{Codec.ServiceDoc}}
+{{{Codec.ServiceDoc}}}
 {{/Codec.ServiceDoc}}
 func New{{Codec.ShortName}}RESTClient(ctx context.Context, opts ...option.ClientOption) (*{{Codec.ClientName}}, error) {
 	clientOpts := append(default{{Codec.ShortName}}RESTClientOptions(), opts...)
