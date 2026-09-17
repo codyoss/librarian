@@ -622,7 +622,7 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	if mAnn.IsServerStream {
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
 			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
-		appendRoutingHeadersGRPC(&sb, m, mProto)
+		appendRoutingHeadersGRPC(&sb, m, mProto, sAnn)
 		appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
 		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
 			m.Name, m.Name, m.Name)
@@ -659,7 +659,7 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	}
 
 	// Routing headers
-	appendRoutingHeadersGRPC(&sb, m, mProto)
+	appendRoutingHeadersGRPC(&sb, m, mProto, sAnn)
 
 	// OpenTelemetry Telemetry Context
 	appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
@@ -692,16 +692,42 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		if itemsField == "" {
 			itemsField = mAnn.IteratorType
 		}
-		fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%s, string, error) {\n", elemType)
+fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%s, string, error) {\n", elemType)
 		fmt.Fprintf(&sb, "\t\tresp := &%s{}\n", mAnn.ResponseType)
 		sb.WriteString("\t\tif pageToken != \"\" {\n")
 		sb.WriteString("\t\t\treq.PageToken = pageToken\n")
 		sb.WriteString("\t\t}\n")
-		sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-		sb.WriteString("\t\t\treq.PageSize = math.MaxInt32\n")
-		sb.WriteString("\t\t} else if pageSize != 0 {\n")
-		sb.WriteString("\t\t\treq.PageSize = int32(pageSize)\n")
-		sb.WriteString("\t\t}\n")
+		pageSizeFieldName := mAnn.PageSizeFieldName
+		if pageSizeFieldName == "" {
+			pageSizeFieldName = "PageSize"
+		}
+		if mAnn.PageSizeIsWrapper {
+			if mAnn.PageSizeWrapperType == "UInt32Value" {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.UInt32Value{Value: uint32(math.MaxInt32)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.UInt32Value{Value: uint32(pageSize)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.Int32Value{Value: math.MaxInt32}\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.Int32Value{Value: int32(pageSize)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
+		} else if mAnn.PageSizeIsUint32 {
+			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
+			sb.WriteString("\t\t} else if pageSize != 0 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
+			sb.WriteString("\t\t}\n")
+		} else {
+			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
+			sb.WriteString("\t\t} else if pageSize != 0 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
+			sb.WriteString("\t\t}\n")
+		}
 		sb.WriteString("\t\terr := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
 		sb.WriteString("\t\t\tvar err error\n")
 		fmt.Fprintf(&sb, "\t\t\tresp, err = executeRPC(ctx, %s.%s, req, settings.GRPC, c.logger, %q)\n",
@@ -723,7 +749,13 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t\treturn nextPageToken, nil\n")
 		sb.WriteString("\t}\n\n")
 		sb.WriteString("\tit.pageInfo, it.nextFunc = iterator.NewPageInfo(fetch, it.bufLen, it.takeBuf)\n")
-		sb.WriteString("\tit.pageInfo.MaxSize = int(req.GetPageSize())\n")
+		if mAnn.PageSizeIsWrapper {
+			fmt.Fprintf(&sb, "\tif psVal := req.Get%s(); psVal != nil {\n", pageSizeFieldName)
+			sb.WriteString("\t\tit.pageInfo.MaxSize = int(psVal.GetValue())\n")
+			sb.WriteString("\t}\n")
+		} else {
+			fmt.Fprintf(&sb, "\tit.pageInfo.MaxSize = int(req.Get%s())\n", pageSizeFieldName)
+		}
 		sb.WriteString("\tit.pageInfo.Token = req.GetPageToken()\n\n")
 		sb.WriteString("\treturn it\n")
 		sb.WriteString("}\n")
@@ -800,9 +832,9 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		retErr = "return nil, \"\", err"
 	}
 
-	restNumericEnum := true
-	if sAnn.Model != nil && sAnn.Model.DIREGAPIC {
-		restNumericEnum = false
+	restNumericEnum := false
+	if sAnn.Model != nil && sAnn.Model.RESTNumericEnums {
+		restNumericEnum = true
 	}
 
 	// Doc comment
@@ -876,7 +908,21 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		if pageSizeFieldName == "" {
 			pageSizeFieldName = "PageSize"
 		}
-		if mAnn.PageSizeIsUint32 {
+		if mAnn.PageSizeIsWrapper {
+			if mAnn.PageSizeWrapperType == "UInt32Value" {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.UInt32Value{Value: uint32(math.MaxInt32)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.UInt32Value{Value: uint32(pageSize)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.Int32Value{Value: math.MaxInt32}\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = &wrapperspb.Int32Value{Value: int32(pageSize)}\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
+		} else if mAnn.PageSizeIsUint32 {
 			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
 			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
 			sb.WriteString("\t\t} else if pageSize != 0 {\n")
@@ -960,7 +1006,13 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t}\n\n")
 
 		sb.WriteString("\tit.pageInfo, it.nextFunc = iterator.NewPageInfo(fetch, it.bufLen, it.takeBuf)\n")
-		fmt.Fprintf(&sb, "\tit.pageInfo.MaxSize = int(req.Get%s())\n", pageSizeFieldName)
+		if mAnn.PageSizeIsWrapper {
+			fmt.Fprintf(&sb, "\tif psVal := req.Get%s(); psVal != nil {\n", pageSizeFieldName)
+			sb.WriteString("\t\tit.pageInfo.MaxSize = int(psVal.GetValue())\n")
+			sb.WriteString("\t}\n")
+		} else {
+			fmt.Fprintf(&sb, "\tit.pageInfo.MaxSize = int(req.Get%s())\n", pageSizeFieldName)
+		}
 		sb.WriteString("\tit.pageInfo.Token = req.GetPageToken()\n\n")
 		sb.WriteString("\treturn it\n")
 		sb.WriteString("}\n")
@@ -1003,7 +1055,7 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 
 	// Headers
 	sb.WriteString("\t// Build HTTP headers from client and context metadata.\n")
-	appendRoutingHeadersREST(&sb, m, mProto)
+	appendRoutingHeadersREST(&sb, m, mProto, sAnn)
 
 	// Telemetry
 	appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, true)
@@ -1206,7 +1258,7 @@ func resolveGRPCStub(m *api.Method, sAnn *ServiceAnnotation) string {
 	}
 }
 
-func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto) {
+func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto, sAnn *ServiceAnnotation) {
 	if mProto != nil && dynamicRequestHeadersExist(mProto) {
 		headers := parseDynamicRequestHeaders(mProto)
 		sb.WriteString("\troutingHeaders := \"\"\n")
@@ -1222,9 +1274,19 @@ func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descri
 			fmt.Fprintf(sb, "\t\troutingHeadersMap[%q] = %s\n", headerName, regexHelper)
 			sb.WriteString("\t}\n")
 		}
-		sb.WriteString("\tfor headerName, headerValue := range routingHeadersMap {\n")
-		sb.WriteString("\t\troutingHeaders = fmt.Sprintf(\"%s%s=%s&\", routingHeaders, headerName, headerValue)\n")
-		sb.WriteString("\t}\n")
+		if sAnn != nil && sAnn.Model != nil && sAnn.Model.OrderedRoutingHeaders {
+			for _, h := range headers {
+				headerName := h[2]
+				fmt.Fprintf(sb, "\tif headerValue, ok := routingHeadersMap[%q]; ok {\n", headerName)
+				fmt.Fprintf(sb, "\t\troutingHeaders = fmt.Sprintf(\"%%s%%s=%%s&\", routingHeaders, %q, headerValue)\n", headerName)
+				fmt.Fprintf(sb, "\t\tdelete(routingHeadersMap, %q)\n", headerName)
+				sb.WriteString("\t}\n")
+			}
+		} else {
+			sb.WriteString("\tfor headerName, headerValue := range routingHeadersMap {\n")
+			sb.WriteString("\t\troutingHeaders = fmt.Sprintf(\"%s%s=%s&\", routingHeaders, headerName, headerValue)\n")
+			sb.WriteString("\t}\n")
+		}
 		sb.WriteString("\troutingHeaders = strings.TrimSuffix(routingHeaders, \"&\")\n")
 		sb.WriteString("\thds := []string{\"x-goog-request-params\", routingHeaders}\n\n")
 		sb.WriteString("\thds = append(c.xGoogHeaders, hds...)\n")
@@ -1270,7 +1332,7 @@ func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descri
 	sb.WriteString("\tctx = gax.InsertMetadataIntoOutgoingContext(ctx, c.xGoogHeaders...)\n")
 }
 
-func appendRoutingHeadersREST(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto) {
+func appendRoutingHeadersREST(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto, sAnn *ServiceAnnotation) {
 	if mProto != nil && dynamicRequestHeadersExist(mProto) {
 		headers := parseDynamicRequestHeaders(mProto)
 		sb.WriteString("\troutingHeaders := \"\"\n")
@@ -1286,9 +1348,19 @@ func appendRoutingHeadersREST(sb *strings.Builder, m *api.Method, mProto *descri
 			fmt.Fprintf(sb, "\t\troutingHeadersMap[%q] = %s\n", headerName, regexHelper)
 			sb.WriteString("\t}\n")
 		}
-		sb.WriteString("\tfor headerName, headerValue := range routingHeadersMap {\n")
-		sb.WriteString("\t\troutingHeaders = fmt.Sprintf(\"%s%s=%s&\", routingHeaders, headerName, headerValue)\n")
-		sb.WriteString("\t}\n")
+		if sAnn != nil && sAnn.Model != nil && sAnn.Model.OrderedRoutingHeaders {
+			for _, h := range headers {
+				headerName := h[2]
+				fmt.Fprintf(sb, "\tif headerValue, ok := routingHeadersMap[%q]; ok {\n", headerName)
+				fmt.Fprintf(sb, "\t\troutingHeaders = fmt.Sprintf(\"%%s%%s=%%s&\", routingHeaders, %q, headerValue)\n", headerName)
+				fmt.Fprintf(sb, "\t\tdelete(routingHeadersMap, %q)\n", headerName)
+				sb.WriteString("\t}\n")
+			}
+		} else {
+			sb.WriteString("\tfor headerName, headerValue := range routingHeadersMap {\n")
+			sb.WriteString("\t\troutingHeaders = fmt.Sprintf(\"%s%s=%s&\", routingHeaders, headerName, headerValue)\n")
+			sb.WriteString("\t}\n")
+		}
 		sb.WriteString("\troutingHeaders = strings.TrimSuffix(routingHeaders, \"&\")\n")
 		sb.WriteString("\thds := []string{\"x-goog-request-params\", routingHeaders}\n\n")
 		sb.WriteString("\thds = append(c.xGoogHeaders, hds...)\n")
@@ -1352,7 +1424,7 @@ func appendTelemetryContext(sb *strings.Builder, m *api.Method, mProto *descript
 		}
 	}
 
-	if hasHeaders {
+	if hasHeaders && !m.ClientSideStreaming {
 		dynamicRes := false
 		if sAnn != nil && sAnn.Model != nil && sAnn.Model.DynamicResourceHeuristics {
 			dynamicRes = true
@@ -1365,6 +1437,18 @@ func appendTelemetryContext(sb *strings.Builder, m *api.Method, mProto *descript
 			}
 			gettersStr := strings.Join(getters, ", ")
 			host := sAnn.URLDomain
+			if descInfo != nil && descInfo.ServiceDescriptors != nil && m.SourceServiceID != "" {
+				sProto := descInfo.ServiceDescriptors[m.SourceServiceID]
+				if sProto == nil {
+					sProto = descInfo.ServiceDescriptors[strings.TrimPrefix(m.SourceServiceID, ".")]
+				}
+				if sProto != nil && proto.HasExtension(sProto.GetOptions(), annotations.E_DefaultHost) {
+					extHost := proto.GetExtension(sProto.GetOptions(), annotations.E_DefaultHost).(string)
+					if extHost != "" {
+						host = extHost
+					}
+				}
+			}
 			sb.WriteString("\tif gax.IsFeatureEnabled(\"TRACING\") || gax.IsFeatureEnabled(\"LOGGING\") {\n")
 			if host != "" {
 				fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"//%s/%s\", %s))\n",

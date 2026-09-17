@@ -59,6 +59,35 @@ func main() {
 		// TODO: Handle error.
 	}
 	defer c.Close()
+{{#Codec.IsBidiStream}}
+	stream, err := c.{{Name}}(ctx)
+	if err != nil {
+		// TODO: Handle error.
+	}
+	go func() {
+		reqs := []*{{Codec.RequestType}}{
+			// TODO: Create requests.
+		}
+		for _, req := range reqs {
+			if err := stream.Send(req); err != nil {
+				// TODO: Handle error.
+			}
+		}
+		stream.CloseSend()
+	}()
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			// TODO: handle error.
+		}
+		// TODO: Use resp.
+		_ = resp
+	}
+{{/Codec.IsBidiStream}}
+{{^Codec.IsBidiStream}}
 
 	req := &{{Codec.RequestType}}{
 		// TODO: Fill request struct fields.
@@ -130,6 +159,7 @@ func main() {
 	// TODO: Use resp.
 	_ = resp
 {{/Codec.IsUnary}}
+{{/Codec.IsBidiStream}}
 }
 
 // [END {{Codec.RegionTag}}]

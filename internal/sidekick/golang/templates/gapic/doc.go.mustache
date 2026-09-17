@@ -93,12 +93,20 @@ limitations under the License.
 //		// TODO: Fill request struct fields.
 //		// See https://pkg.go.dev/{{Codec.DocExample.ProtoImportPath}}#{{Codec.DocExample.RequestType}}.
 //	}
+{{#Codec.DocExample.ReturnsEmpty}}
+//	err = c.{{Codec.DocExample.MethodName}}(ctx, req)
+//	if err != nil {
+//		// TODO: Handle error.
+//	}
+{{/Codec.DocExample.ReturnsEmpty}}
+{{^Codec.DocExample.ReturnsEmpty}}
 //	resp, err := c.{{Codec.DocExample.MethodName}}(ctx, req)
 //	if err != nil {
 //		// TODO: Handle error.
 //	}
 //	// TODO: Use resp.
 //	_ = resp
+{{/Codec.DocExample.ReturnsEmpty}}
 {{/Codec.DocExample.IsUnary}}
 {{#Codec.DocExample.IsPaged}}
 //	req := &{{Codec.DocExample.ProtoPkg}}.{{Codec.DocExample.RequestType}}{

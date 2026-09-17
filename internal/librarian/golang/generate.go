@@ -252,6 +252,9 @@ func generateNativeGAPIC(ctx context.Context, apiPath string, goAPI *config.GoAP
 	if goAPI.DIREGAPIC {
 		codecMap["diregapic"] = "true"
 	}
+	if sc != nil && sc.HasRESTNumericEnums(config.LanguageGo) && !goAPI.DIREGAPIC {
+		codecMap["rest-numeric-enums"] = "true"
+	}
 	if trans := transport(sc); trans != "" {
 		codecMap["transport"] = string(trans)
 	}

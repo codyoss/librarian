@@ -104,6 +104,19 @@ func TestDocCommentFormatting(t *testing.T) {
 			deprecated: true,
 			want:       "// OldMethod does something old.\n//\n// Deprecated: OldMethod may be removed in a future version.",
 		},
+		{
+			name:       "preserve ASCII quotes after equals in filter syntax",
+			methodName: "ListAccounts",
+			raw:        `Filter by type="ACCOUNT_AGGREGATION".`,
+			want:       `// ListAccounts filter by type="ACCOUNT_AGGREGATION".`,
+		},
+		{
+			name:       "preserve existing Deprecated comment",
+			methodName: "OldMethod",
+			raw:        "Deprecated: use NewMethod instead.",
+			deprecated: true,
+			want:       "// OldMethod is deprecated.\n//\n// Deprecated: use NewMethod instead.",
+		},
 	}
 
 	for _, tt := range tests {
@@ -923,3 +936,96 @@ func TestComputeSnippetResultTypeCustomOp(t *testing.T) {
 		t.Errorf("expected *Operation, got %q", got)
 	}
 }
+
+func TestFindPageSizeFieldWrapperGating(t *testing.T) {
+	regularMethod := &api.Method{
+		InputType: &api.Message{
+			Fields: []*api.Field{
+				{Name: "page_size", Typez: api.TypezInt32},
+			},
+		},
+	}
+	wrapperMethod := &api.Method{
+		InputType: &api.Message{
+			Fields: []*api.Field{
+				{Name: "max_results", Typez: api.TypezMessage, TypezID: ".google.protobuf.UInt32Value"},
+			},
+		},
+	}
+
+	if f := findPageSizeField(regularMethod, false); f == nil || f.Name != "page_size" {
+		t.Errorf("expected regular page size field to be found when wrappersAllowed=false")
+	}
+	if f := findPageSizeField(regularMethod, true); f == nil || f.Name != "page_size" {
+		t.Errorf("expected regular page size field to be found when wrappersAllowed=true")
+	}
+
+	if f := findPageSizeField(wrapperMethod, false); f != nil {
+		t.Errorf("expected wrapper page size field to be ignored when wrappersAllowed=false, got %v", f)
+	}
+	if f := findPageSizeField(wrapperMethod, true); f == nil || f.Name != "max_results" {
+		t.Errorf("expected wrapper page size field to be found when wrappersAllowed=true")
+	}
+}
+
+func TestComputeServiceImportsPureGRPC(t *testing.T) {
+	pureGRPC := &ServiceAnnotation{
+		HasGRPC: true,
+		HasREST: false,
+	}
+	imports := computeServiceImports(pureGRPC, nil, nil)
+	for _, imp := range imports.Standard {
+		if imp.Path == "net/http" {
+			t.Errorf("pure gRPC service imports should not contain net/http")
+		}
+	}
+	for _, imp := range imports.ThirdParty {
+		if imp.Path == "google.golang.org/protobuf/encoding/protojson" {
+			t.Errorf("pure gRPC service imports should not contain protojson")
+		}
+	}
+
+	dualTransport := &ServiceAnnotation{
+		HasGRPC: true,
+		HasREST: true,
+	}
+	dualImports := computeServiceImports(dualTransport, nil, nil)
+	hasHTTP := false
+	hasProtojson := false
+	for _, imp := range dualImports.Standard {
+		if imp.Path == "net/http" {
+			hasHTTP = true
+		}
+	}
+	for _, imp := range dualImports.ThirdParty {
+		if imp.Path == "google.golang.org/protobuf/encoding/protojson" {
+			hasProtojson = true
+		}
+	}
+	if !hasHTTP {
+		t.Errorf("dual transport service imports should contain net/http")
+	}
+	if !hasProtojson {
+		t.Errorf("dual transport service imports should contain protojson")
+	}
+}
+
+func TestSelectDocExampleReturnsEmpty(t *testing.T) {
+	svc := &api.Service{
+		ID:   "test.v1.TestService",
+		Name: "TestService",
+		Methods: []*api.Method{
+			{
+				Name:            "DeleteFoo",
+				SourceServiceID: "test.v1.TestService",
+				InputTypeID:     "test.v1.DeleteFooRequest",
+				OutputTypeID:    ".google.protobuf.Empty",
+			},
+		},
+	}
+	ex := selectDocExample([]*api.Service{svc}, nil, "test", true, true)
+	if !ex.ReturnsEmpty {
+		t.Errorf("expected ReturnsEmpty to be true for method returning .google.protobuf.Empty")
+	}
+}
+

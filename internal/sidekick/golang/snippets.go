@@ -110,6 +110,9 @@ func computeSnippetResultType(mAnn *MethodAnnotation) string {
 	if mAnn.IsPaged {
 		return mAnn.IteratorType
 	}
+	if mAnn.IsBidiStream || mAnn.IsServerStream || mAnn.IsClientStream {
+		return mAnn.StreamClientType
+	}
 	if mAnn.IsUnary {
 		return "*" + mAnn.ResponseType
 	}
@@ -160,7 +163,7 @@ func GenerateSnippets(model *api.API, snippetsDir string, provider language.Temp
 
 		var methods []*api.Method
 		for _, m := range sAnn.ExampleMethods {
-			if m.ClientSideStreaming || m.ServerSideStreaming {
+			if m.ClientSideStreaming != m.ServerSideStreaming {
 				continue
 			}
 			methods = append(methods, m)
@@ -228,11 +231,16 @@ func GenerateSnippets(model *api.API, snippetsDir string, provider language.Temp
 						},
 						ShortName: m.Name,
 					},
-					Parameters: []SnippetParameter{
-						{Name: "ctx", Type: "context.Context"},
-						{Name: "req", Type: methAnn.RequestType},
-						{Name: "opts", Type: "...gax.CallOption"},
-					},
+					Parameters: func() []SnippetParameter {
+						params := []SnippetParameter{
+							{Name: "ctx", Type: "context.Context"},
+						}
+						if !methAnn.IsBidiStream && !methAnn.IsClientStream {
+							params = append(params, SnippetParameter{Name: "req", Type: methAnn.RequestType})
+						}
+						params = append(params, SnippetParameter{Name: "opts", Type: "...gax.CallOption"})
+						return params
+					}(),
 					ResultType: resultType,
 					ShortName:  m.Name,
 				},

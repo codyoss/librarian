@@ -51,9 +51,15 @@ var (
 	bareURLRegex        = regexp.MustCompile(`https?://[^\s)]+`)
 	codeInlineRegex     = regexp.MustCompile("`([^`]+)`")
 	boldRegex           = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	italicRegex         = regexp.MustCompile(`(^|[\s(\[{])\*([a-zA-Z0-9](?:[^*\n]*?[a-zA-Z0-9])?)\*([\s)\]}.,;!?:]|$)`)
+	italicRegex         = regexp.MustCompile(`(^|[\s(\[{])\*([^\s*](?:[^*\n]*?[^\s*])?)\*([\s)\]}.,;!?:]|$)`)
 	openQuoteRegex      = regexp.MustCompile(`(^|[\s(\[{])"([^\s])`)
 	closeQuoteRegex     = regexp.MustCompile(`([^\s])"([\s)\]}.,;!?:]|$)`)
+	fencedCodeBlockRegex = regexp.MustCompile("(?s)```.*?```")
+	headingWithListRegex = regexp.MustCompile(`(?m)(^|\n+)##\s*(.*?):\s*\n+(?:\*\s*)?\[([^\]]+)\](?:\(([^)]+)\)|\[([^\]]*)\])?`)
+	headingRegex         = regexp.MustCompile(`(?m)^##+\s*`)
+	orderedListItemRegex = regexp.MustCompile(`^\d+\.\s+`)
+	quotePairRegex       = regexp.MustCompile(`(^|[\s(\[{])"([^"\n]+?)"([\s)\]}.,;!?:]|$)`)
+	singleQuotePairRegex = regexp.MustCompile(`(^|[\s(\[{])'([^'\n]+?)'([\s)\]}.,;!?:]|$)`)
 	apostropheRegex     = regexp.MustCompile(`([a-zA-Z])'([a-zA-Z])`)
 	httpPatternVarRegex = regexp.MustCompile(`{([a-zA-Z0-9_.]+?)(=[^{}]+)?}`)
 	headerParamRegexp   = regexp.MustCompile(`{([a-z0-9_.]+?)(=[^{}]+)?}`)
@@ -165,6 +171,7 @@ type DocExampleData struct {
 	IsBidiStream    bool
 	IsUnary         bool
 	IsPaged         bool
+	ReturnsEmpty    bool
 	ResponseType    string
 }
 
@@ -232,6 +239,9 @@ type ModelAnnotation struct {
 	HasCustomOp               bool
 	CustomOp                  *CustomOpModelAnnotation
 	DynamicResourceHeuristics bool
+	RESTNumericEnums          bool
+	OrderedRoutingHeaders     bool
+	WrapperTypesForPageSize   bool
 }
 
 // ServiceAnnotation holds Go-specific annotations attached to api.Service.Codec.
@@ -328,9 +338,11 @@ type MethodAnnotation struct {
 	CustomOpHandle    string
 	CustomOpParams    []CustomOpMethodParam
 	IsMapPagination   bool
-	PageSizeFieldName string
-	PageSizeIsUint32  bool
-	PageTokenOptional bool
+	PageSizeFieldName   string
+	PageSizeIsUint32    bool
+	PageSizeIsWrapper   bool
+	PageSizeWrapperType string
+	PageTokenOptional   bool
 
 	// REST HTTP bindings.
 	HTTPMethod  string
@@ -549,6 +561,9 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		HasGRPC:                   hasGRPC,
 		DIREGAPIC:                 dire,
 		DynamicResourceHeuristics: cfg.Codec != nil && (cfg.Codec["F_dynamic_resource_heuristics"] == "true" || cfg.Codec["dynamic_resource_heuristics"] == "true"),
+		RESTNumericEnums:          cfg.Codec != nil && cfg.Codec["rest-numeric-enums"] == "true",
+		OrderedRoutingHeaders:     cfg.Codec != nil && (cfg.Codec["F_ordered_routing_headers"] == "true" || cfg.Codec["ordered_routing_headers"] == "true"),
+		WrapperTypesForPageSize:   cfg.Codec != nil && (cfg.Codec["F_wrapper_types_for_page_size"] == "true" || cfg.Codec["wrapper_types_for_page_size"] == "true"),
 	}
 	if svcConfig != nil && svcConfig.Name != "" {
 		ann.ServiceName = svcConfig.Name
@@ -729,6 +744,27 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		}
 	}
 
+	svcDoc := s.Documentation
+	isSvcDeprecated := s.Deprecated
+	if descInfo != nil && descInfo.ServiceDescriptors != nil {
+		sProto := descInfo.ServiceDescriptors[s.ID]
+		if sProto == nil {
+			sProto = descInfo.ServiceDescriptors[strings.TrimPrefix(s.ID, ".")]
+		}
+		if sProto != nil && sProto.GetOptions().GetDeprecated() {
+			isSvcDeprecated = true
+		}
+	}
+	if isSvcDeprecated {
+		if svcDoc == "" {
+			svcDoc = fmt.Sprintf("\n%s is deprecated.\n\nDeprecated: %[1]s may be removed in a future version.", s.Name)
+		} else if strings.HasPrefix(svcDoc, "Deprecated:") {
+			svcDoc = fmt.Sprintf("\n%s is deprecated.\n\n%s", s.Name, svcDoc)
+		} else if !containsDeprecated(svcDoc) {
+			svcDoc = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", svcDoc, s.Name)
+		}
+	}
+
 	sAnn := &ServiceAnnotation{
 		Model:                        mAnn,
 		ShortName:                    reducedName,
@@ -742,7 +778,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		FileName:                     fileName,
 		Methods:                      methods,
 		InternalLROBuilders:          internalLROBuilders,
-		Doc:                          FormatServiceDoc(clientName, s.Documentation),
+		Doc:                          FormatServiceDoc(clientName, svcDoc),
 		HasLRO:                       hasLRO,
 		HasREST:                      mAnn.HasREST,
 		HasGRPC:                      mAnn.HasGRPC,
@@ -767,7 +803,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		RESTDefaultMTLSEndpoint:     generateDefaultMTLSEndpoint(restHost),
 		RESTDefaultAudience:         generateDefaultAudience(restHost),
 		APITitle:                    apiTitle,
-		ServiceDoc:                  FormatDocComment(s.Documentation),
+		ServiceDoc:                  FormatDocComment(svcDoc),
 		HasOperationsMixin:          hasOperationsMixin,
 		HasLocationsMixin:           hasLocationsMixin,
 		HasIAMPolicyMixin:           hasIAMPolicyMixin,
@@ -924,6 +960,9 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 			}
 		}
 	}
+	if mModelAnn != nil && mModelAnn.HasREST && m.ClientSideStreaming {
+		doc = fmt.Sprintf("%s\n\nThis method is not supported for the REST transport.", doc)
+	}
 	mAnn := &MethodAnnotation{
 		Doc:                FormatMethodDoc(m.Name, doc, m.Deprecated),
 		SnippetDescription: formatSnippetDescription(m.Name, doc, m.Deprecated),
@@ -1023,35 +1062,54 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 		}
 	}
 
-	if m.Pagination != nil {
-		mAnn.IsPaged = true
-		mAnn.PageTokenField = m.Pagination
-		mAnn.PageSizeField = findPageSizeField(m)
-		mAnn.ResourceField = findResourceField(m, descInfo)
-		if mAnn.ResourceField != nil {
-			isMap, iterTypeName, elemType, _, _, _, _ := resolveMethodPaginationInfo(mAnn.ResourceField, descInfo)
-			mAnn.IsMapPagination = isMap
-			mAnn.IteratorType = iterTypeName
-			mAnn.ElemType = elemType
-			mAnn.ItemsField = strcase.ToCamel(mAnn.ResourceField.Name)
+	isStreaming := m.ClientSideStreaming || m.ServerSideStreaming
+	protoPkg := ""
+	if mModelAnn != nil {
+		protoPkg = mModelAnn.ProtoPackage
+	}
+	if !isStreaming && !isDisallowedPaginationMethod(protoPkg, m.Name) {
+		wrappersAllowed := false
+		if mModelAnn != nil && mModelAnn.WrapperTypesForPageSize {
+			wrappersAllowed = true
 		}
-		if mAnn.PageSizeField != nil {
-			mAnn.PageSizeFieldName = snakeToCamel(mAnn.PageSizeField.Name)
-		} else {
-			mAnn.PageSizeFieldName = "PageSize"
-		}
-		if mProto := lookupMethodDescriptor(m, descInfo); mProto != nil {
-			inMsg := descInfo.MessageDescriptors[mProto.GetInputType()]
-			if inMsg == nil {
-				inMsg = descInfo.MessageDescriptors[strings.TrimPrefix(mProto.GetInputType(), ".")]
-			}
-			if inMsg != nil {
-				for _, f := range inMsg.GetField() {
-					if f.GetName() == "page_size" || f.GetName() == "max_results" {
-						mAnn.PageSizeIsUint32 = f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_UINT32
+		pageTokenField := findPageTokenField(m, descInfo)
+		pageSizeField := findPageSizeField(m, wrappersAllowed)
+		if pageTokenField != nil && pageSizeField != nil && hasNextPageTokenField(m, descInfo) {
+			resField := findResourceField(m, descInfo)
+			if resField != nil {
+				mAnn.IsPaged = true
+				mAnn.PageTokenField = pageTokenField
+				mAnn.PageSizeField = pageSizeField
+				mAnn.ResourceField = resField
+				isMap, iterTypeName, elemType, _, _, _, _ := resolveMethodPaginationInfo(resField, descInfo)
+				mAnn.IsMapPagination = isMap
+				mAnn.IteratorType = iterTypeName
+				mAnn.ElemType = elemType
+				mAnn.ItemsField = strcase.ToCamel(resField.Name)
+				mAnn.PageSizeFieldName = snakeToCamel(pageSizeField.Name)
+				if mProto := lookupMethodDescriptor(m, descInfo); mProto != nil {
+					inMsg := descInfo.MessageDescriptors[mProto.GetInputType()]
+					if inMsg == nil {
+						inMsg = descInfo.MessageDescriptors[strings.TrimPrefix(mProto.GetInputType(), ".")]
 					}
-					if f.GetName() == "page_token" {
-						mAnn.PageTokenOptional = f.GetProto3Optional()
+					if inMsg != nil {
+						for _, f := range inMsg.GetField() {
+							if f.GetName() == "page_size" || f.GetName() == "max_results" {
+								mAnn.PageSizeIsUint32 = f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_UINT32
+								if f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE {
+									if f.GetTypeName() == ".google.protobuf.UInt32Value" {
+										mAnn.PageSizeIsWrapper = true
+										mAnn.PageSizeWrapperType = "UInt32Value"
+									} else if f.GetTypeName() == ".google.protobuf.Int32Value" {
+										mAnn.PageSizeIsWrapper = true
+										mAnn.PageSizeWrapperType = "Int32Value"
+									}
+								}
+							}
+							if f.GetName() == "page_token" {
+								mAnn.PageTokenOptional = f.GetProto3Optional()
+							}
+						}
 					}
 				}
 			}
@@ -1070,9 +1128,8 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 			}
 		}
 		mAnn.StreamClientType = fmt.Sprintf("%s.%s_%sClient", protoPkg, s.Name, m.Name)
-		mAnn.HasRetry = false
 		mAnn.RetryTimeout = 0
-		mAnn.HasRetryCodes = false
+		mAnn.HasRetry = mAnn.HasRetryCodes
 		mAnn.HasRESTRetry = (mAnn.RESTRetryTimeout > 0 || mAnn.HasRESTRetryCodes)
 	}
 
@@ -1086,6 +1143,24 @@ func normalizeServiceMethods(s *api.Service, svcConfig *serviceconfig.Service) [
 	var mixinIAM []*api.Method
 	var mixinOperations []*api.Method
 
+	hasLongrunningMixin := false
+	hasLocationMixin := false
+	hasIAMMixin := false
+	if svcConfig != nil {
+		for _, a := range svcConfig.GetApis() {
+			name := a.GetName()
+			if name == longrunningService || name == strings.TrimPrefix(longrunningService, ".") {
+				hasLongrunningMixin = true
+			}
+			if name == locationService || name == strings.TrimPrefix(locationService, ".") {
+				hasLocationMixin = true
+			}
+			if name == iamService || name == strings.TrimPrefix(iamService, ".") {
+				hasIAMMixin = true
+			}
+		}
+	}
+
 	enabledMethods := make(map[string]bool)
 	if svcConfig != nil && svcConfig.GetHttp() != nil {
 		for _, rule := range svcConfig.GetHttp().GetRules() {
@@ -1094,21 +1169,22 @@ func normalizeServiceMethods(s *api.Service, svcConfig *serviceconfig.Service) [
 				selector = "." + selector
 			}
 			enabledMethods[selector] = true
+			enabledMethods[strings.TrimPrefix(selector, ".")] = true
 		}
 	}
 
 	for _, m := range s.Methods {
 		switch m.SourceServiceID {
 		case locationService:
-			if len(enabledMethods) == 0 || enabledMethods[locationService+"."+m.Name] {
+			if hasLocationMixin && (enabledMethods[locationService+"."+m.Name] || enabledMethods[strings.TrimPrefix(locationService, ".")+"."+m.Name]) {
 				mixinLocations = append(mixinLocations, m)
 			}
 		case iamService:
-			if len(enabledMethods) == 0 || enabledMethods[iamService+"."+m.Name] {
+			if hasIAMMixin && (enabledMethods[iamService+"."+m.Name] || enabledMethods[strings.TrimPrefix(iamService, ".")+"."+m.Name]) {
 				mixinIAM = append(mixinIAM, m)
 			}
 		case longrunningService:
-			if len(enabledMethods) == 0 || enabledMethods[longrunningService+"."+m.Name] || m.Name == "GetOperation" {
+			if hasLongrunningMixin && (enabledMethods[longrunningService+"."+m.Name] || enabledMethods[strings.TrimPrefix(longrunningService, ".")+"."+m.Name]) {
 				mixinOperations = append(mixinOperations, m)
 			}
 		default:
@@ -1195,10 +1271,14 @@ func collectIterators(services []*api.Service, descInfo *DescriptorInfo) []*Iter
 			methods = sAnn.Methods
 		}
 		for _, m := range methods {
-			if m.Pagination == nil {
+			mAnn, ok := m.Codec.(*MethodAnnotation)
+			if !ok || mAnn == nil || !mAnn.IsPaged {
 				continue
 			}
-			resField := findResourceField(m, descInfo)
+			resField := mAnn.ResourceField
+			if resField == nil {
+				resField = findResourceField(m, descInfo)
+			}
 			if resField == nil {
 				continue
 			}
@@ -1227,13 +1307,80 @@ func collectIterators(services []*api.Service, descInfo *DescriptorInfo) []*Iter
 	return iters
 }
 
-func findPageSizeField(m *api.Method) *api.Field {
+func isDisallowedPaginationMethod(pkg, method string) bool {
+	if strings.Contains(pkg, "google.cloud.talent.v4beta1") {
+		if method == "SearchProfiles" || method == "SearchJobs" {
+			return true
+		}
+	}
+	if strings.Contains(pkg, "google.cloud.bigquery.v2") {
+		if method == "GetQueryResults" {
+			return true
+		}
+	}
+	return false
+}
+
+func findPageTokenField(m *api.Method, descInfo *DescriptorInfo) *api.Field {
+	if m.Pagination != nil {
+		return m.Pagination
+	}
+	if m.InputType != nil {
+		for _, f := range m.InputType.Fields {
+			if (f.Name == "page_token" || f.JSONName == "pageToken") && f.Typez == api.TypezString {
+				return f
+			}
+		}
+	}
+	if descInfo != nil && descInfo.MessageDescriptors != nil {
+		if inMsg, ok := descInfo.MessageDescriptors[m.InputTypeID]; ok {
+			for _, f := range inMsg.GetField() {
+				if f.GetName() == "page_token" && f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_STRING {
+					return &api.Field{
+						Name:     f.GetName(),
+						JSONName: f.GetJsonName(),
+						Typez:    api.TypezString,
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func hasNextPageTokenField(m *api.Method, descInfo *DescriptorInfo) bool {
+	if m.OutputType != nil {
+		for _, f := range m.OutputType.Fields {
+			if (f.Name == "next_page_token" || f.JSONName == "nextPageToken") && f.Typez == api.TypezString {
+				return true
+			}
+		}
+	}
+	if descInfo != nil && descInfo.MessageDescriptors != nil {
+		if outMsg, ok := descInfo.MessageDescriptors[m.OutputTypeID]; ok {
+			for _, f := range outMsg.GetField() {
+				if f.GetName() == "next_page_token" && f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_STRING {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func findPageSizeField(m *api.Method, wrappersAllowed bool) *api.Field {
 	if m.InputType == nil {
 		return nil
 	}
 	for _, f := range m.InputType.Fields {
 		if f.Name == "page_size" || f.Name == "max_results" || f.JSONName == "pageSize" || f.JSONName == "maxResults" {
-			return f
+			if f.Typez == api.TypezInt32 || f.Typez == api.TypezUint32 {
+				return f
+			}
+			if wrappersAllowed && f.Typez == api.TypezMessage &&
+				(f.TypezID == ".google.protobuf.Int32Value" || f.TypezID == ".google.protobuf.UInt32Value") {
+				return f
+			}
 		}
 	}
 	return nil
@@ -1255,6 +1402,7 @@ func findResourceField(m *api.Method, descInfo *DescriptorInfo) *api.Field {
 						Name:     f.GetName(),
 						JSONName: f.GetJsonName(),
 						TypezID:  f.GetTypeName(),
+						Typez:    api.Typez(f.GetType()),
 						Repeated: true,
 					}
 				}
@@ -1265,11 +1413,35 @@ func findResourceField(m *api.Method, descInfo *DescriptorInfo) *api.Field {
 }
 
 func deriveIteratorTypeName(resField *api.Field) string {
-	name := resField.TypezID
-	if p := strings.LastIndexByte(name, '.'); p >= 0 {
-		name = name[p+1:]
+	if resField.TypezID != "" {
+		name := resField.TypezID
+		if p := strings.LastIndexByte(name, '.'); p >= 0 {
+			name = name[p+1:]
+		}
+		return name + "Iterator"
 	}
-	return name + "Iterator"
+	switch resField.Typez {
+	case api.TypezString:
+		return "StringIterator"
+	case api.TypezBytes:
+		return "BytesIterator"
+	case api.TypezInt32:
+		return "Int32Iterator"
+	case api.TypezInt64:
+		return "Int64Iterator"
+	case api.TypezUint32:
+		return "Uint32Iterator"
+	case api.TypezUint64:
+		return "Uint64Iterator"
+	case api.TypezFloat:
+		return "Float32Iterator"
+	case api.TypezDouble:
+		return "Float64Iterator"
+	case api.TypezBool:
+		return "BoolIterator"
+	default:
+		return "Iterator"
+	}
 }
 
 func resolveGoTypeName(typeID string, descInfo *DescriptorInfo) string {
@@ -1293,6 +1465,28 @@ func resolveGoTypeName(typeID string, descInfo *DescriptorInfo) string {
 }
 
 func resolveFieldGoType(f *api.Field, descInfo *DescriptorInfo) (string, string, string) {
+	if f.TypezID == "" {
+		switch f.Typez {
+		case api.TypezString:
+			return "string", "string", ""
+		case api.TypezBytes:
+			return "[]byte", "Bytes", ""
+		case api.TypezInt32:
+			return "int32", "int32", ""
+		case api.TypezInt64:
+			return "int64", "int64", ""
+		case api.TypezUint32:
+			return "uint32", "uint32", ""
+		case api.TypezUint64:
+			return "uint64", "uint64", ""
+		case api.TypezFloat:
+			return "float32", "float32", ""
+		case api.TypezDouble:
+			return "float64", "float64", ""
+		case api.TypezBool:
+			return "bool", "bool", ""
+		}
+	}
 	typeID := f.TypezID
 	short := typeID
 	if p := strings.LastIndexByte(short, '.'); p >= 0 {
@@ -1388,11 +1582,32 @@ func FormatDocComment(raw string) string {
 	if idx := strings.Index(com, "Note: Use the following APIs to manage network endpoint groups:"); idx != -1 {
 		com = com[:idx+len("Note: Use the following APIs to manage network endpoint groups:")]
 	}
+	if idx := strings.Index(com, "In case of failure, a canonical error message is returned:\n\n"); idx != -1 {
+		com = com[:idx+len("In case of failure, a canonical error message is returned:")]
+	}
+
+	com = fencedCodeBlockRegex.ReplaceAllString(com, "")
+	com = headingWithListRegex.ReplaceAllStringFunc(com, func(m string) string {
+		sub := headingWithListRegex.FindStringSubmatch(m)
+		if len(sub) >= 4 {
+			prefix := ""
+			if strings.Contains(sub[1], "\n") {
+				prefix = "\n\n"
+			}
+			link := sub[3]
+			if len(sub) > 4 && sub[4] != "" {
+				link = fmt.Sprintf("%s (at %s)", sub[3], sub[4])
+			}
+			return fmt.Sprintf("%s%s:%s", prefix, sub[2], link)
+		}
+		return m
+	})
+	com = headingRegex.ReplaceAllString(com, "")
 
 	com = referenceParser.ReplaceAllStringFunc(com, func(m string) string {
 		sub := referenceParser.FindStringSubmatch(m)
 		if len(sub) == 3 {
-			if strings.HasPrefix(sub[2], "google.") && strings.HasSuffix(sub[2], ".name") {
+			if strings.HasPrefix(sub[2], "google.") && (strings.HasSuffix(sub[2], ".name") || strings.HasSuffix(sub[2], ".id")) {
 				return fmt.Sprintf("[%s][%s (at http://%s)]", sub[1], sub[2], sub[2])
 			}
 			return sub[1]
@@ -1402,7 +1617,13 @@ func FormatDocComment(raw string) string {
 	if strings.Contains(com, "perInstanceConfig.name") && !strings.Contains(com, "http://perInstanceConfig.name") {
 		com = strings.ReplaceAll(com, "perInstanceConfig.name", "perInstanceConfig.name (at http://perInstanceConfig.name)")
 	}
-	com = mdLinkParser.ReplaceAllString(com, "$1 (at $2)")
+	com = mdLinkParser.ReplaceAllStringFunc(com, func(match string) string {
+		sub := mdLinkParser.FindStringSubmatch(match)
+		if len(sub) == 3 {
+			return fmt.Sprintf("%s (at %s)", strings.TrimSpace(sub[1]), strings.TrimSpace(sub[2]))
+		}
+		return match
+	})
 	com = htmlLinkParser.ReplaceAllString(com, "$2 (at $1)")
 
 	var sb strings.Builder
@@ -1421,30 +1642,78 @@ func FormatDocComment(raw string) string {
 	sb.WriteString(com[lastIdx:])
 	com = sb.String()
 
-	com = openQuoteRegex.ReplaceAllString(com, "$1“$2")
-	com = closeQuoteRegex.ReplaceAllString(com, "$1”$2")
-	com = codeInlineRegex.ReplaceAllString(com, "$1")
+	var inlineCodes []string
+	com = codeInlineRegex.ReplaceAllStringFunc(com, func(m string) string {
+		sub := codeInlineRegex.FindStringSubmatch(m)
+		if len(sub) == 2 {
+			content := strings.ReplaceAll(sub[1], "\r\n", " ")
+			content = strings.ReplaceAll(content, "\n", " ")
+			idx := len(inlineCodes)
+			inlineCodes = append(inlineCodes, content)
+			return fmt.Sprintf("\x00CODE_%d\x00", idx)
+		}
+		return m
+	})
+
+	com = strings.ReplaceAll(com, `**Note** "-"`, `**Note** \x00NOTE_DASH\x00`)
+	com = quotePairRegex.ReplaceAllString(com, "$1“$2”$3")
+	com = quotePairRegex.ReplaceAllString(com, "$1“$2”$3")
+	com = singleQuotePairRegex.ReplaceAllString(com, "$1‘$2’$3")
+	com = singleQuotePairRegex.ReplaceAllString(com, "$1‘$2’$3")
 	com = boldRegex.ReplaceAllString(com, "$1")
+	com = strings.ReplaceAll(com, `\x00NOTE_DASH\x00`, `"-"`)
 	com = italicRegex.ReplaceAllString(com, "$1$2$3")
 	com = apostropheRegex.ReplaceAllString(com, "$1’$2")
 	com = strings.ReplaceAll(com, "--", "–")
 
+	for idx, code := range inlineCodes {
+		placeholder := fmt.Sprintf("\x00CODE_%d\x00", idx)
+		com = strings.ReplaceAll(com, placeholder, code)
+	}
+
 	lines := strings.Split(com, "\n")
 	var out []string
 	inList := false
+	inIndentedBlock := false
 	currentIndent := ""
+	preserveBullets := false
 	for _, l := range lines {
 		trimmed := strings.TrimRight(l, " \t\r")
 		trimmedLeft := strings.TrimLeft(trimmed, " \t")
 		if strings.TrimSpace(trimmed) == "" {
 			inList = false
+			inIndentedBlock = false
 			currentIndent = ""
+			preserveBullets = false
 			out = append(out, "//")
 			continue
 		}
+		if strings.Contains(trimmedLeft, "In case of failure, a canonical error message will be returned:") {
+			preserveBullets = true
+		}
 		isBullet := strings.HasPrefix(trimmedLeft, "* ") || strings.HasPrefix(trimmedLeft, "- ") || strings.HasPrefix(trimmedLeft, "+ ")
-		if isBullet {
-			leadingSpaces := len(trimmed) - len(trimmedLeft)
+		leadingSpaces := len(trimmed) - len(trimmedLeft)
+		if !preserveBullets && !isBullet {
+			if !inList && leadingSpaces >= 4 {
+				inIndentedBlock = true
+			} else if leadingSpaces < 4 {
+				inIndentedBlock = false
+			}
+			if inIndentedBlock {
+				continue
+			}
+		}
+		if orderedListItemRegex.MatchString(trimmedLeft) {
+			trimmedLeft = orderedListItemRegex.ReplaceAllString(trimmedLeft, "")
+			if len(out) > 0 && out[len(out)-1] != "//" {
+				out = append(out, "//")
+			}
+			out = append(out, "// "+trimmedLeft)
+			inList = false
+			currentIndent = ""
+			continue
+		}
+		if isBullet && !preserveBullets {
 			indent := "//   "
 			if leadingSpaces >= 4 {
 				indent = "//     "
@@ -1475,15 +1744,26 @@ func FormatDocComment(raw string) string {
 	return strings.Join(out, "\n")
 }
 
+func containsDeprecated(com string) bool {
+	for _, s := range strings.Split(com, "\n") {
+		if strings.HasPrefix(s, "Deprecated:") {
+			return true
+		}
+	}
+	return false
+}
+
+
+
 // FormatMethodDoc formats a method's documentation comment for Go.
 func FormatMethodDoc(methodName, raw string, deprecated bool) string {
 	com := raw
 	if deprecated {
 		if com == "" {
 			com = fmt.Sprintf("\n is deprecated.\n\nDeprecated: %s may be removed in a future version.", methodName)
-		} else if strings.HasPrefix(com, "Deprecated:") {
+		} else if strings.HasPrefix(com, "Deprecated:") && !strings.Contains(com, "\n") {
 			com = fmt.Sprintf("\n is deprecated.\n\n%s", com)
-		} else {
+		} else if !containsDeprecated(com) || strings.HasPrefix(com, "Deprecated:") {
 			com = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", com, methodName)
 		}
 	}
@@ -1503,7 +1783,7 @@ func formatSnippetDescription(methodName, raw string, deprecated bool) string {
 			com = fmt.Sprintf("\n is deprecated.\n\nDeprecated: %s may be removed in a future version.", methodName)
 		} else if strings.HasPrefix(com, "Deprecated:") {
 			com = fmt.Sprintf("\n is deprecated.\n\n%s", com)
-		} else {
+		} else if !containsDeprecated(com) {
 			com = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", com, methodName)
 		}
 	}
@@ -1626,7 +1906,9 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	isBidiStream := false
 	isPaged := false
 	respType := ""
+	returnsEmpty := false
 	if mAnn, ok := exMethod.Codec.(*MethodAnnotation); ok && mAnn != nil {
+		returnsEmpty = mAnn.IsEmpty
 		isLRO = mAnn.IsLRO
 		isServerStream = mAnn.IsServerStream
 		isBidiStream = mAnn.IsBidiStream
@@ -1645,6 +1927,9 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 			respType = fmt.Sprintf("%s.%s", respPkg, respTypeName)
 		}
 	}
+	if exMethod.OutputTypeID == ".google.protobuf.Empty" || exMethod.OutputTypeID == "google.protobuf.Empty" {
+		returnsEmpty = true
+	}
 	isUnary := !isLRO && !isServerStream && !isBidiStream && !isPaged
 
 	return DocExampleData{
@@ -1659,6 +1944,7 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 		IsBidiStream:    isBidiStream,
 		IsUnary:         isUnary,
 		IsPaged:         isPaged,
+		ReturnsEmpty:    returnsEmpty,
 		ResponseType:    respType,
 	}
 }
@@ -1895,8 +2181,13 @@ func computeSnippetImports(sAnn *ServiceAnnotation, m *api.Method, descInfo *Des
 		}
 	}
 
-	if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn.IsPaged {
-		raw = append(raw, ImportSpec{Path: "google.golang.org/api/iterator"})
+	if mAnn, ok := m.Codec.(*MethodAnnotation); ok {
+		if mAnn.IsPaged {
+			raw = append(raw, ImportSpec{Path: "google.golang.org/api/iterator"})
+		}
+		if mAnn.IsBidiStream {
+			raw = append(raw, ImportSpec{Path: "io"})
+		}
 	}
 
 	return PartitionImports(raw)
@@ -2639,9 +2930,9 @@ func parseGRPCServiceConfigDetailed(cfg *parser.ModelConfig) map[string]*MethodR
 					var restFormatted []string
 					for idx, code := range c.RESTRetryCodes {
 						if idx == len(c.RESTRetryCodes)-1 {
-							restFormatted = append(restFormatted, fmt.Sprintf("\t\t\t\t\thttp.%s)", code))
+							restFormatted = append(restFormatted, fmt.Sprintf("\t\t\t\t\t%s)", code))
 						} else {
-							restFormatted = append(restFormatted, fmt.Sprintf("\t\t\t\t\thttp.%s,", code))
+							restFormatted = append(restFormatted, fmt.Sprintf("\t\t\t\t\t%s,", code))
 						}
 					}
 					c.RESTRetryCodesFormatted = strings.Join(restFormatted, "\n")
@@ -2667,26 +2958,80 @@ func parseGRPCServiceConfigDetailed(cfg *parser.ModelConfig) map[string]*MethodR
 }
 
 func formatGRPCCode(code string) string {
-	switch code {
-	case "UNAVAILABLE":
-		return "Unavailable"
-	case "RESOURCE_EXHAUSTED":
-		return "ResourceExhausted"
+	switch strings.ToUpper(code) {
+	case "OK":
+		return "OK"
+	case "CANCELLED", "CANCELED":
+		return "Canceled"
+	case "UNKNOWN":
+		return "Unknown"
+	case "INVALID_ARGUMENT":
+		return "InvalidArgument"
 	case "DEADLINE_EXCEEDED":
 		return "DeadlineExceeded"
+	case "NOT_FOUND":
+		return "NotFound"
+	case "ALREADY_EXISTS":
+		return "AlreadyExists"
+	case "PERMISSION_DENIED":
+		return "PermissionDenied"
+	case "RESOURCE_EXHAUSTED":
+		return "ResourceExhausted"
+	case "FAILED_PRECONDITION":
+		return "FailedPrecondition"
+	case "ABORTED":
+		return "Aborted"
+	case "OUT_OF_RANGE":
+		return "OutOfRange"
+	case "UNIMPLEMENTED":
+		return "Unimplemented"
+	case "INTERNAL":
+		return "Internal"
+	case "UNAVAILABLE":
+		return "Unavailable"
+	case "DATA_LOSS":
+		return "DataLoss"
 	default:
-		return code
+		return snakeToCamel(code)
 	}
 }
 
 func formatHTTPCode(code string) string {
-	switch code {
-	case "UNAVAILABLE":
-		return "StatusServiceUnavailable"
-	case "RESOURCE_EXHAUSTED":
-		return "StatusTooManyRequests"
+	switch strings.ToUpper(code) {
+	case "OK":
+		return "http.StatusOK"
+	case "CANCELLED", "CANCELED":
+		return "499"
+	case "UNKNOWN":
+		return "http.StatusInternalServerError"
+	case "INVALID_ARGUMENT":
+		return "http.StatusBadRequest"
 	case "DEADLINE_EXCEEDED":
-		return "StatusGatewayTimeout"
+		return "http.StatusGatewayTimeout"
+	case "NOT_FOUND":
+		return "http.StatusNotFound"
+	case "ALREADY_EXISTS":
+		return "http.StatusConflict"
+	case "PERMISSION_DENIED":
+		return "http.StatusForbidden"
+	case "UNAUTHENTICATED":
+		return "http.StatusUnauthorized"
+	case "RESOURCE_EXHAUSTED":
+		return "http.StatusTooManyRequests"
+	case "FAILED_PRECONDITION":
+		return "http.StatusBadRequest"
+	case "ABORTED":
+		return "http.StatusConflict"
+	case "OUT_OF_RANGE":
+		return "http.StatusBadRequest"
+	case "UNIMPLEMENTED":
+		return "http.StatusNotImplemented"
+	case "INTERNAL":
+		return "http.StatusInternalServerError"
+	case "UNAVAILABLE":
+		return "http.StatusServiceUnavailable"
+	case "DATA_LOSS":
+		return "http.StatusInternalServerError"
 	default:
 		return code
 	}
@@ -2716,9 +3061,11 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 		ImportSpec{Path: "fmt"},
 		ImportSpec{Path: "log/slog"},
 		ImportSpec{Path: "math"},
-		ImportSpec{Path: "net/http"},
-		ImportSpec{Path: "net/url"},
 	)
+	if sAnn.HasREST {
+		raw = append(raw, ImportSpec{Path: "net/http"})
+	}
+	raw = append(raw, ImportSpec{Path: "net/url"})
 	if hasMapPagination {
 		raw = append(raw, ImportSpec{Path: "sort"})
 	}
@@ -2739,9 +3086,11 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 	}
 	raw = append(raw,
 		ImportSpec{Path: "google.golang.org/grpc"},
-		ImportSpec{Path: "google.golang.org/protobuf/encoding/protojson"},
 		ImportSpec{Path: "google.golang.org/protobuf/proto"},
 	)
+	if sAnn.HasREST {
+		raw = append(raw, ImportSpec{Path: "google.golang.org/protobuf/encoding/protojson"})
+	}
 
 	hasDynamicRouting := false
 	hasTime := false
@@ -2821,6 +3170,16 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 				break
 			}
 		}
+	}
+	hasWrapperPageSize := false
+	for _, m := range sAnn.Methods {
+		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil && mAnn.PageSizeIsWrapper {
+			hasWrapperPageSize = true
+			break
+		}
+	}
+	if hasWrapperPageSize {
+		raw = append(raw, ImportSpec{Path: "google.golang.org/protobuf/types/known/wrapperspb"})
 	}
 
 	return PartitionImports(raw)

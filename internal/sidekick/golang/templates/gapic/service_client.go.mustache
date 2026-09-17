@@ -295,14 +295,14 @@ type {{Codec.GRPCClientName}} struct {
 
 	operationsClient longrunningpb.OperationsClient
 {{/Codec.HasOperationsMixin}}
-{{#Codec.HasLocationsMixin}}
-
-	locationsClient locationpb.LocationsClient
-{{/Codec.HasLocationsMixin}}
 {{#Codec.HasIAMPolicyMixin}}
 
 	iamPolicyClient iampb.IAMPolicyClient
 {{/Codec.HasIAMPolicyMixin}}
+{{#Codec.HasLocationsMixin}}
+
+	locationsClient locationpb.LocationsClient
+{{/Codec.HasLocationsMixin}}
 
 	// The x-goog-* metadata to be sent with each request.
 	xGoogHeaders []string
@@ -350,12 +350,12 @@ func New{{Codec.ClientName}}(ctx context.Context, opts ...option.ClientOption) (
 {{#Codec.HasOperationsMixin}}
 		operationsClient: longrunningpb.NewOperationsClient(connPool),
 {{/Codec.HasOperationsMixin}}
-{{#Codec.HasLocationsMixin}}
-		locationsClient: locationpb.NewLocationsClient(connPool),
-{{/Codec.HasLocationsMixin}}
 {{#Codec.HasIAMPolicyMixin}}
 		iamPolicyClient: iampb.NewIAMPolicyClient(connPool),
 {{/Codec.HasIAMPolicyMixin}}
+{{#Codec.HasLocationsMixin}}
+		locationsClient: locationpb.NewLocationsClient(connPool),
+{{/Codec.HasLocationsMixin}}
 	}
 	c.setGoogleClientInfo()
 	if gax.IsFeatureEnabled("METRICS") {
@@ -588,6 +588,7 @@ func (c *{{Codec.GRPCClientName}}) {{Codec.OperationType}}(name string) *{{Codec
 }
 {{/Codec.HasGRPC}}
 
+{{#Codec.HasREST}}
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.
 func (c *{{Codec.RESTClientName}}) {{Codec.OperationType}}(name string) *{{Codec.OperationType}} {
@@ -597,4 +598,6 @@ func (c *{{Codec.RESTClientName}}) {{Codec.OperationType}}(name string) *{{Codec
 		pollPath: override,
 	}
 }
+{{/Codec.HasREST}}
 {{/Codec.InternalLROBuilders}}
+
