@@ -252,7 +252,7 @@ func fieldGetter(field string) string {
 	return buildAccessor(field, false)
 }
 
-func resourceNameField(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo) *heuristicTarget {
+func resourceNameField(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo, dynamicRes bool) *heuristicTarget {
 	if m == nil || m.GetInputType() == "" || descInfo == nil || descInfo.MessageDescriptors == nil {
 		return nil
 	}
@@ -269,7 +269,25 @@ func resourceNameField(m *descriptorpb.MethodDescriptorProto, descInfo *Descript
 	}
 
 	if len(candidates) == 0 {
-		return nil
+		if !dynamicRes {
+			return nil
+		}
+		if m.GetOptions() == nil {
+			return nil
+		}
+		eHTTP := proto.GetExtension(m.GetOptions(), annotations.E_Http)
+		if eHTTP == nil {
+			return nil
+		}
+		h, ok := eHTTP.(*annotations.HttpRule)
+		if !ok || h == nil {
+			return nil
+		}
+		target, err := identifyHeuristicTarget(m, h, descInfo.Vocabulary)
+		if err != nil || target == nil {
+			return nil
+		}
+		return target
 	}
 
 	selected := candidates[0]
@@ -444,7 +462,7 @@ func queryParams(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo
 	return res
 }
 
-func generateQueryStringCode(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo, retErr string) string {
+func generateQueryStringCode(m *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo, retErr string, restNumericEnum bool) string {
 	qp := queryParams(m, descInfo)
 	fields := make([]string, 0, len(qp))
 	for p := range qp {
@@ -452,9 +470,15 @@ func generateQueryStringCode(m *descriptorpb.MethodDescriptorProto, descInfo *De
 	}
 	sort.Strings(fields)
 
+	if !restNumericEnum && len(fields) == 0 {
+		return ""
+	}
+
 	var sb strings.Builder
 	sb.WriteString("\tparams := url.Values{}\n")
-	sb.WriteString("\tparams.Add(\"$alt\", \"json;enum-encoding=int\")\n")
+	if restNumericEnum {
+		sb.WriteString("\tparams.Add(\"$alt\", \"json;enum-encoding=int\")\n")
+	}
 
 	for _, path := range fields {
 		field := qp[path]
@@ -494,7 +518,11 @@ func generateQueryStringCode(m *descriptorpb.MethodDescriptorProto, descInfo *De
 			sb.WriteString("\t\t}\n")
 			sb.WriteString("\t}\n")
 		} else if field.GetProto3Optional() {
-			fmt.Fprintf(&sb, "\tif req%s != nil {\n", accessor)
+			toks := strings.Split(path, ".")
+			toks = toks[:len(toks)-1]
+			parentField := fieldGetter(strings.Join(toks, "."))
+			directLeafField := buildAccessor(path, true)
+			fmt.Fprintf(&sb, "\tif req%s != nil && req%s != nil {\n", parentField, directLeafField)
 			for line := range strings.SplitSeq(strings.TrimSuffix(paramAdd, "\n"), "\n") {
 				sb.WriteString("\t" + line + "\n")
 			}
@@ -772,6 +800,11 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		retErr = "return nil, \"\", err"
 	}
 
+	restNumericEnum := true
+	if sAnn.Model != nil && sAnn.Model.DIREGAPIC {
+		restNumericEnum = false
+	}
+
 	// Doc comment
 	if mAnn.Doc != "" {
 		sb.WriteString(mAnn.Doc + "\n")
@@ -796,6 +829,9 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	case mAnn.IsLRO:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
 			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.OperationType)
+	case mAnn.IsCustomOp:
+		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*Operation, error) {\n",
+			sAnn.RESTClientName, m.Name, mAnn.RequestType)
 	case mAnn.IsServerStream:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
 			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
@@ -808,6 +844,14 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	if mAnn.IsPaged {
 		fmt.Fprintf(&sb, "\tit := &%s{}\n", mAnn.IteratorType)
 		sb.WriteString("\treq = proto.CloneOf(req)\n")
+		hasBody := bodyField != "" && verb != "GET" && verb != "DELETE"
+		if hasBody {
+			if sAnn.Model != nil && sAnn.Model.DIREGAPIC {
+				sb.WriteString("\tm := protojson.MarshalOptions{AllowPartial: true}\n")
+			} else {
+				sb.WriteString("\tm := protojson.MarshalOptions{AllowPartial: true, UseEnumNumbers: true}\n")
+			}
+		}
 		sb.WriteString("\tunm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}\n")
 		elemType := mAnn.ElemType
 		if elemType == "" {
@@ -819,23 +863,54 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		}
 		fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%s, string, error) {\n", elemType)
 		fmt.Fprintf(&sb, "\t\tresp := &%s{}\n", mAnn.ResponseType)
-		sb.WriteString("\t\tif pageToken != \"\" {\n")
-		sb.WriteString("\t\t\treq.PageToken = pageToken\n")
-		sb.WriteString("\t\t}\n")
-		sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-		sb.WriteString("\t\t\treq.PageSize = math.MaxInt32\n")
-		sb.WriteString("\t\t} else if pageSize != 0 {\n")
-		sb.WriteString("\t\t\treq.PageSize = int32(pageSize)\n")
-		sb.WriteString("\t\t}\n")
+		if mAnn.PageTokenOptional {
+			sb.WriteString("\t\tif pageToken != \"\" {\n")
+			sb.WriteString("\t\t\treq.PageToken = proto.String(pageToken)\n")
+			sb.WriteString("\t\t}\n")
+		} else {
+			sb.WriteString("\t\tif pageToken != \"\" {\n")
+			sb.WriteString("\t\t\treq.PageToken = pageToken\n")
+			sb.WriteString("\t\t}\n")
+		}
+		pageSizeFieldName := mAnn.PageSizeFieldName
+		if pageSizeFieldName == "" {
+			pageSizeFieldName = "PageSize"
+		}
+		if mAnn.PageSizeIsUint32 {
+			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
+			sb.WriteString("\t\t} else if pageSize != 0 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
+			sb.WriteString("\t\t}\n")
+		} else {
+			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
+			sb.WriteString("\t\t} else if pageSize != 0 {\n")
+			fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
+			sb.WriteString("\t\t}\n")
+		}
+
+		bodyReader := "nil"
+		logBody := "nil"
+		if hasBody {
+			sb.WriteString("\t\tjsonReq, err := m.Marshal(req)\n")
+			sb.WriteString("\t\tif err != nil {\n")
+			sb.WriteString("\t\t\treturn nil, \"\", err\n")
+			sb.WriteString("\t\t}\n\n")
+			bodyReader = "bytes.NewReader(jsonReq)"
+			logBody = "jsonReq"
+		}
 
 		// URL and Query
 		baseURLCode := generateBaseURLCode(urlStr, "\treturn nil, \"\", err")
 		sb.WriteString(indentCode(baseURLCode, 1))
 		sb.WriteString("\n")
 
-		queryCode := generateQueryStringCode(mProto, descInfo, "\treturn nil, \"\", err")
-		sb.WriteString(indentCode(queryCode, 1))
-		sb.WriteString("\n")
+		queryCode := generateQueryStringCode(mProto, descInfo, "\treturn nil, \"\", err", restNumericEnum)
+		if queryCode != "" {
+			sb.WriteString(indentCode(queryCode, 1))
+			sb.WriteString("\n")
+		}
 
 		sb.WriteString("\t\t// Build HTTP headers from client and context metadata.\n")
 		sb.WriteString("\t\thds := append(c.xGoogHeaders, \"Content-Type\", \"application/json\")\n")
@@ -844,12 +919,12 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t\t\tif settings.Path != \"\" {\n")
 		sb.WriteString("\t\t\t\tbaseUrl.Path = settings.Path\n")
 		sb.WriteString("\t\t\t}\n")
-		fmt.Fprintf(&sb, "\t\t\thttpReq, err := http.NewRequest(%q, baseUrl.String(), nil)\n", verb)
+		fmt.Fprintf(&sb, "\t\t\thttpReq, err := http.NewRequest(%q, baseUrl.String(), %s)\n", verb, bodyReader)
 		sb.WriteString("\t\t\tif err != nil {\n")
 		sb.WriteString("\t\t\t\treturn err\n")
 		sb.WriteString("\t\t\t}\n")
 		sb.WriteString("\t\t\thttpReq.Header = headers\n\n")
-		fmt.Fprintf(&sb, "\t\t\tbuf, err := executeHTTPRequest(ctx, c.httpClient, httpReq, c.logger, nil, %q)\n", m.Name)
+		fmt.Fprintf(&sb, "\t\t\tbuf, err := executeHTTPRequest(ctx, c.httpClient, httpReq, c.logger, %s, %q)\n", logBody, m.Name)
 		sb.WriteString("\t\t\tif err != nil {\n")
 		sb.WriteString("\t\t\t\treturn err\n")
 		sb.WriteString("\t\t\t}\n")
@@ -862,7 +937,17 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t\t\treturn nil, \"\", e\n")
 		sb.WriteString("\t\t}\n")
 		sb.WriteString("\t\tit.Response = resp\n")
-		fmt.Fprintf(&sb, "\t\treturn resp.Get%s(), resp.GetNextPageToken(), nil\n", itemsField)
+		if mAnn.IsMapPagination {
+			sb.WriteString("\n")
+			fmt.Fprintf(&sb, "\t\telems := make([]%s, 0, len(resp.Get%s()))\n", elemType, itemsField)
+			fmt.Fprintf(&sb, "\t\tfor k, v := range resp.Get%s() {\n", itemsField)
+			fmt.Fprintf(&sb, "\t\t\telems = append(elems, %s{k, v})\n", elemType)
+			sb.WriteString("\t\t}\n")
+			sb.WriteString("\t\tsort.Slice(elems, func(i, j int) bool { return elems[i].Key < elems[j].Key })\n\n")
+			sb.WriteString("\t\treturn elems, resp.GetNextPageToken(), nil\n")
+		} else {
+			fmt.Fprintf(&sb, "\t\treturn resp.Get%s(), resp.GetNextPageToken(), nil\n", itemsField)
+		}
 		sb.WriteString("\t}\n\n")
 
 		sb.WriteString("\tfetch := func(pageSize int, pageToken string) (string, error) {\n")
@@ -875,7 +960,7 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t}\n\n")
 
 		sb.WriteString("\tit.pageInfo, it.nextFunc = iterator.NewPageInfo(fetch, it.bufLen, it.takeBuf)\n")
-		sb.WriteString("\tit.pageInfo.MaxSize = int(req.GetPageSize())\n")
+		fmt.Fprintf(&sb, "\tit.pageInfo.MaxSize = int(req.Get%s())\n", pageSizeFieldName)
 		sb.WriteString("\tit.pageInfo.Token = req.GetPageToken()\n\n")
 		sb.WriteString("\treturn it\n")
 		sb.WriteString("}\n")
@@ -886,7 +971,11 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	bodyReader := "nil"
 	logBody := "nil"
 	if bodyField != "" && verb != "GET" && verb != "DELETE" {
-		sb.WriteString("\tm := protojson.MarshalOptions{AllowPartial: true, UseEnumNumbers: true}\n")
+		if sAnn.Model != nil && sAnn.Model.DIREGAPIC {
+			sb.WriteString("\tm := protojson.MarshalOptions{AllowPartial: true}\n")
+		} else {
+			sb.WriteString("\tm := protojson.MarshalOptions{AllowPartial: true, UseEnumNumbers: true}\n")
+		}
 		requestObj := "req"
 		if bodyField != "*" {
 			requestObj = "body"
@@ -906,8 +995,11 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	sb.WriteString("\n")
 
 	// Query params
-	sb.WriteString(generateQueryStringCode(mProto, descInfo, retErr))
-	sb.WriteString("\n")
+	queryCode := generateQueryStringCode(mProto, descInfo, retErr, restNumericEnum)
+	if queryCode != "" {
+		sb.WriteString(queryCode)
+		sb.WriteString("\n")
+	}
 
 	// Headers
 	sb.WriteString("\t// Build HTTP headers from client and context metadata.\n")
@@ -916,8 +1008,8 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	// Telemetry
 	appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, true)
 
-	// Call options (only for Unary)
-	if mAnn.IsUnary {
+	// Call options (only for Unary and CustomOp)
+	if mAnn.IsUnary || mAnn.IsCustomOp {
 		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
 			m.Name, m.Name, m.Name)
 	}
@@ -1000,6 +1092,8 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		respType := mAnn.ResponseType
 		if mAnn.IsLRO {
 			respType = "longrunningpb.Operation"
+		} else if mAnn.IsCustomOp && sAnn.Model != nil && sAnn.Model.CustomOp != nil {
+			respType = strings.TrimPrefix(sAnn.Model.CustomOp.ProtoType, "*")
 		}
 		sb.WriteString("\tunm := protojson.UnmarshalOptions{AllowPartial: true, DiscardUnknown: true}\n")
 		fmt.Fprintf(&sb, "\tresp := &%s{}\n", respType)
@@ -1052,6 +1146,17 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString("\t\tlro.SetParentSpanContext(trace.SpanContextFromContext(ctx))\n")
 		sb.WriteString("\t}\n")
 		fmt.Fprintf(&sb, "\treturn &%s{\n\t\tlro:      lro,\n\t\tpollPath: override,\n\t}, nil\n", mAnn.OperationType)
+	} else if mAnn.IsCustomOp {
+		sb.WriteString("\top := &Operation{\n")
+		fmt.Fprintf(&sb, "\t\t&%s{\n", mAnn.CustomOpHandle)
+		sb.WriteString("\t\t\tc:       c.operationClient,\n")
+		sb.WriteString("\t\t\tproto:   resp,\n")
+		for _, p := range mAnn.CustomOpParams {
+			fmt.Fprintf(&sb, "\t\t\t%s: %s,\n", p.Name, p.Getter)
+		}
+		sb.WriteString("\t\t},\n")
+		sb.WriteString("\t}\n")
+		sb.WriteString("\treturn op, nil\n")
 	} else {
 		sb.WriteString("\treturn resp, nil\n")
 	}
@@ -1248,14 +1353,26 @@ func appendTelemetryContext(sb *strings.Builder, m *api.Method, mProto *descript
 	}
 
 	if hasHeaders {
-		resTarget := resourceNameField(mProto, descInfo)
+		dynamicRes := false
+		if sAnn != nil && sAnn.Model != nil && sAnn.Model.DynamicResourceHeuristics {
+			dynamicRes = true
+		}
+		resTarget := resourceNameField(mProto, descInfo, dynamicRes)
 		if resTarget != nil && len(resTarget.FieldNames) > 0 {
-			f := resTarget.FieldNames[0]
-			getter := fmt.Sprintf("req%s", fieldGetter(f))
+			var getters []string
+			for _, f := range resTarget.FieldNames {
+				getters = append(getters, fmt.Sprintf("req%s", fieldGetter(f)))
+			}
+			gettersStr := strings.Join(getters, ", ")
 			host := sAnn.URLDomain
 			sb.WriteString("\tif gax.IsFeatureEnabled(\"TRACING\") || gax.IsFeatureEnabled(\"LOGGING\") {\n")
-			fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"//%s/%%v\", %s))\n",
-				host, getter)
+			if host != "" {
+				fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"//%s/%s\", %s))\n",
+					host, resTarget.Format, gettersStr)
+			} else {
+				fmt.Fprintf(sb, "\t\tctx = callctx.WithTelemetryContext(ctx, \"resource_name\", fmt.Sprintf(\"%s\", %s))\n",
+					resTarget.Format, gettersStr)
+			}
 			sb.WriteString("\t}\n")
 		}
 	}

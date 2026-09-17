@@ -21,6 +21,7 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -99,6 +100,9 @@ type SnippetSegment struct {
 func computeSnippetResultType(mAnn *MethodAnnotation) string {
 	if mAnn.IsEmpty {
 		return ""
+	}
+	if mAnn.IsCustomOp {
+		return "*Operation"
 	}
 	if mAnn.IsLRO {
 		return mAnn.OperationType
@@ -254,6 +258,8 @@ func GenerateSnippets(model *api.API, snippetsDir string, provider language.Temp
 	return writeSnippetMetadata(metadataPath, metadata)
 }
 
+var spaceSanitizerRegex = regexp.MustCompile(`:\s*`)
+
 func writeSnippetMetadata(path string, data *SnippetMetadataFile) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -266,6 +272,7 @@ func writeSnippetMetadata(path string, data *SnippetMetadataFile) error {
 		return err
 	}
 	content := buf.Bytes()
+	content = spaceSanitizerRegex.ReplaceAll(content, []byte(": "))
 	if len(content) > 0 && content[len(content)-1] == '\n' {
 		content = content[:len(content)-1]
 	}

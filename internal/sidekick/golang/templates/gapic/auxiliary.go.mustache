@@ -142,6 +142,14 @@ func (it *{{TypeName}}) All() iter.Seq2[{{{ElemType}}}, error] {
 	return gaxiter.RangeAdapter(it.Next)
 }
 
+{{#IsMap}}
+// {{ElemType}} is a holder type for {{MapKeyType}}/{{{MapValueType}}} map entries
+type {{ElemType}} struct {
+	Key   {{MapKeyType}}
+	Value {{{MapValueType}}}
+}
+
+{{/IsMap}}
 // {{TypeName}} manages a stream of {{{ElemType}}}.
 type {{TypeName}} struct {
 	items    []{{{ElemType}}}

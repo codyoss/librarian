@@ -52,6 +52,7 @@ type {{Codec.CallOptionsName}} struct {
 {{/Codec.Methods}}
 }
 
+{{#Codec.HasGRPC}}
 func default{{Codec.ShortName}}GRPCClientOptions() []option.ClientOption {
 	return []option.ClientOption{
 		internaloption.WithDefaultEndpoint("{{Codec.DefaultEndpoint}}"),
@@ -99,6 +100,7 @@ func {{Codec.DefaultCallOptionsName}}() *{{Codec.CallOptionsName}} {
 {{/Codec.Methods}}
 	}
 }
+{{/Codec.HasGRPC}}
 {{#Codec.HasREST}}
 
 func default{{Codec.ShortName}}RESTCallOptions() *{{Codec.CallOptionsName}} {
@@ -145,6 +147,9 @@ type {{Codec.InternalClientInterface}} interface {
 	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.OperationType}}, error)
 	{{Codec.OperationType}}(name string) *{{Codec.OperationType}}
 {{/Codec.IsLRO}}
+{{#Codec.IsCustomOp}}
+	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*Operation, error)
+{{/Codec.IsCustomOp}}
 {{#Codec.IsUnary}}
 	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.ResponseType}}, error)
 {{/Codec.IsUnary}}
@@ -239,6 +244,11 @@ func (c *{{Codec.ClientReceiverName}}) {{Codec.OperationType}}(name string) *{{C
 	return c.internalClient.{{Codec.OperationType}}(name)
 }
 {{/Codec.IsLRO}}
+{{#Codec.IsCustomOp}}
+func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*Operation, error) {
+	return c.internalClient.{{Name}}(ctx, req, opts...)
+}
+{{/Codec.IsCustomOp}}
 {{#Codec.IsUnary}}
 func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*{{Codec.ResponseType}}, error) {
 	return c.internalClient.{{Name}}(ctx, req, opts...)
@@ -261,6 +271,7 @@ func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Code
 {{/Codec.IsServerStream}}
 
 {{/Codec.Methods}}
+{{#Codec.HasGRPC}}
 // {{Codec.GRPCClientName}} is a client for interacting with {{Codec.APITitle}} over gRPC transport.
 //
 // Methods, except Close, may be called concurrently. However, fields must not be modified concurrently with method calls.
@@ -406,6 +417,7 @@ func (c *{{Codec.GRPCClientName}}) setGoogleClientInfo(keyval ...string) {
 func (c *{{Codec.GRPCClientName}}) Close() error {
 	return c.connPool.Close()
 }
+{{/Codec.HasGRPC}}
 
 {{#Codec.HasREST}}
 // Methods, except Close, may be called concurrently. However, fields must not be modified concurrently with method calls.
@@ -422,6 +434,11 @@ type {{Codec.RESTClientName}} struct {
 	// Users should not Close this client.
 	LROClient **lroauto.OperationsClient
 {{/Codec.HasLRO}}
+{{#Codec.HasOperationClient}}
+
+	// operationClient is used to call the operation-specific management service.
+	operationClient *{{Codec.OperationClientType}}
+{{/Codec.HasOperationClient}}
 
 	// The x-goog-* headers to be sent with each request.
 	xGoogHeaders []string
@@ -492,6 +509,18 @@ func New{{Codec.ShortName}}RESTClient(ctx context.Context, opts ...option.Client
 	c.LROClient = &opClient
 
 {{/Codec.HasLRO}}
+{{#Codec.HasOperationClient}}
+	o := []option.ClientOption{
+		option.WithHTTPClient(httpClient),
+		option.WithEndpoint(endpoint),
+	}
+	opC, err := {{Codec.OperationClientConstructor}}(ctx, o...)
+	if err != nil {
+		return nil, err
+	}
+	c.operationClient = opC
+
+{{/Codec.HasOperationClient}}
 	return &{{Codec.ClientName}}{internalClient: c, CallOptions: callOpts}, nil
 }
 
@@ -523,6 +552,11 @@ func (c *{{Codec.RESTClientName}}) setGoogleClientInfo(keyval ...string) {
 func (c *{{Codec.RESTClientName}}) Close() error {
 	// Replace httpClient with nil to force cleanup.
 	c.httpClient = nil
+{{#Codec.HasOperationClient}}
+	if err := c.operationClient.Close(); err != nil {
+		return err
+	}
+{{/Codec.HasOperationClient}}
 	return nil
 }
 
@@ -533,15 +567,18 @@ func (c *{{Codec.RESTClientName}}) Connection() *grpc.ClientConn {
 	return nil
 }
 {{/Codec.HasREST}}
+{{#Codec.HasGRPC}}
 {{#Codec.Methods}}
 {{{Codec.GRPCMethodCode}}}
 {{/Codec.Methods}}
+{{/Codec.HasGRPC}}
 {{#Codec.HasREST}}
 {{#Codec.Methods}}
 {{{Codec.RESTMethodCode}}}
 {{/Codec.Methods}}
 {{/Codec.HasREST}}
 {{#Codec.InternalLROBuilders}}
+{{#Codec.HasGRPC}}
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.
 func (c *{{Codec.GRPCClientName}}) {{Codec.OperationType}}(name string) *{{Codec.OperationType}} {
@@ -549,6 +586,7 @@ func (c *{{Codec.GRPCClientName}}) {{Codec.OperationType}}(name string) *{{Codec
 		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*{{Codec.PackageName}}.{{Codec.OperationType}}"),
 	}
 }
+{{/Codec.HasGRPC}}
 
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.

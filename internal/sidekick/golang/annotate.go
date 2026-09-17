@@ -36,6 +36,7 @@ import (
 	"github.com/googleapis/librarian/internal/tool/protoc"
 	"github.com/iancoleman/strcase"
 	"google.golang.org/genproto/googleapis/api/annotations"
+	"google.golang.org/genproto/googleapis/cloud/extendedops"
 	locationpb "google.golang.org/genproto/googleapis/cloud/location"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -64,7 +65,55 @@ const (
 	longrunningService = ".google.longrunning.Operations"
 
 	oauthScopesExtensionTag = 1050
+
+	operationFieldTag         = 1149
+	operationRequestFieldTag  = 1150
+	operationResponseFieldTag = 1151
+	operationServiceTag       = 1249
+	operationPollingMethodTag = 1250
 )
+
+// CustomOpModelAnnotation contains package-level custom operation metadata.
+type CustomOpModelAnnotation struct {
+	MessageName         string
+	HandleInterfaceName string
+	ProtoType           string
+	ProtoTypeID         string
+	StatusField         string
+	StatusDoneValue     string
+	NameField           string
+	Handles             []*CustomOpHandleAnnotation
+
+	ServiceToOpService map[string]*descriptorpb.ServiceDescriptorProto
+	PollingParams      map[*descriptorpb.ServiceDescriptorProto][]string
+}
+
+// CustomOpHandleAnnotation contains metadata for a specific operation handle type.
+type CustomOpHandleAnnotation struct {
+	HandleName        string
+	InterfaceName     string
+	ServiceName       string
+	ClientType        string
+	ProtoType         string
+	RequestType       string
+	OperationField    string
+	ErrorCodeField    string
+	ErrorMessageField string
+	HasErrorField     bool
+	Params            []CustomOpParam
+}
+
+// CustomOpParam represents a parameter field on an operation handle.
+type CustomOpParam struct {
+	Name  string
+	Field string
+}
+
+// CustomOpMethodParam represents an argument passed to the handle initialization in RPC methods.
+type CustomOpMethodParam struct {
+	Name   string
+	Getter string
+}
 
 // ImportSpec represents a Go import path and its package alias/name.
 type ImportSpec struct {
@@ -99,6 +148,8 @@ type DescriptorInfo struct {
 	MessageDescriptors map[string]*descriptorpb.DescriptorProto
 	// ServiceDescriptors maps full service name (.google.cloud.run.v2.Services) to ServiceDescriptorProto.
 	ServiceDescriptors map[string]*descriptorpb.ServiceDescriptorProto
+	// Vocabulary contains learned valid collection nouns for heuristic path templates.
+	Vocabulary map[string]bool
 }
 
 // DocExampleData contains view data for the doc.go usage snippet.
@@ -113,6 +164,8 @@ type DocExampleData struct {
 	IsServerStream  bool
 	IsBidiStream    bool
 	IsUnary         bool
+	IsPaged         bool
+	ResponseType    string
 }
 
 // MetadataService represents a service in gapic_metadata.json.
@@ -170,9 +223,15 @@ type ModelAnnotation struct {
 	Services []*api.Service
 
 	// File imports partitioned for package-level files.
-	DocImports       FileImports
-	HelpersImports   FileImports
-	AuxiliaryImports FileImports
+	DocImports        FileImports
+	HelpersImports    FileImports
+	AuxiliaryImports  FileImports
+	OperationsImports FileImports
+
+	DIREGAPIC                 bool
+	HasCustomOp               bool
+	CustomOp                  *CustomOpModelAnnotation
+	DynamicResourceHeuristics bool
 }
 
 // ServiceAnnotation holds Go-specific annotations attached to api.Service.Codec.
@@ -246,10 +305,16 @@ type ServiceAnnotation struct {
 	ExampleNewRESTClientName string
 	NewClientCall            string
 	NewRESTClientCall        string
+
+	HasOperationClient         bool
+	OperationClientType        string
+	OperationClientConstructor string
 }
 
 // MethodAnnotation holds Go-specific annotations attached to api.Method.Codec.
 type MethodAnnotation struct {
+	Model          *ModelAnnotation
+	Service        *ServiceAnnotation
 	Doc            string
 	IsLRO          bool
 	OperationType  string
@@ -258,6 +323,14 @@ type MethodAnnotation struct {
 	PageTokenField *api.Field
 	PageSizeField  *api.Field
 	ResourceField  *api.Field
+
+	IsCustomOp        bool
+	CustomOpHandle    string
+	CustomOpParams    []CustomOpMethodParam
+	IsMapPagination   bool
+	PageSizeFieldName string
+	PageSizeIsUint32  bool
+	PageTokenOptional bool
 
 	// REST HTTP bindings.
 	HTTPMethod  string
@@ -294,6 +367,8 @@ type MethodAnnotation struct {
 	RESTClientName        string
 	PackageName           string
 	OperationPathOverride string
+	HasGRPC               bool
+	HasREST               bool
 
 	GRPCMethodCode string
 	RESTMethodCode string
@@ -330,6 +405,9 @@ type IteratorType struct {
 	ElemTypeName string
 	ElemPkgName  string
 	ItemsField   string
+	IsMap        bool
+	MapKeyType   string
+	MapValueType string
 }
 
 // FileImports holds partitioned and sorted standard library and third-party imports.
@@ -428,9 +506,10 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 
 	hasREST := true
 	hasGRPC := true
+	dire := false
 	if cfg != nil && cfg.Codec != nil {
 		trans := cfg.Codec["transport"]
-		dire := cfg.Codec["diregapic"] == "true"
+		dire = cfg.Codec["diregapic"] == "true"
 		if trans == "grpc" {
 			hasREST = false
 		} else if trans == "rest" || dire {
@@ -466,8 +545,10 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		IsDeprecated:      releaseLevel == "deprecated",
 		DefaultAuthScopes: scopes,
 		Services:          model.Services,
-		HasREST:           hasREST,
-		HasGRPC:           hasGRPC,
+		HasREST:                   hasREST,
+		HasGRPC:                   hasGRPC,
+		DIREGAPIC:                 dire,
+		DynamicResourceHeuristics: cfg.Codec != nil && (cfg.Codec["F_dynamic_resource_heuristics"] == "true" || cfg.Codec["dynamic_resource_heuristics"] == "true"),
 	}
 	if svcConfig != nil && svcConfig.Name != "" {
 		ann.ServiceName = svcConfig.Name
@@ -481,17 +562,39 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		ann.HasDocSummary = len(ann.DocSummaryLines) > 0
 	}
 
+	if ann.DIREGAPIC {
+		customOp, err := discoverCustomOperations(model, descInfo, clientPkg, importPath)
+		if err == nil && customOp != nil && len(customOp.Handles) > 0 {
+			ann.HasCustomOp = true
+			ann.CustomOp = customOp
+			protoImp := ImportSpec{Path: importPath + "/" + clientPkg + "pb", Name: clientPkg + "pb"}
+			if imp, ok := descInfo.PkgByMessage[customOp.ProtoTypeID]; ok {
+				protoImp = imp
+			}
+			rawOpsImports := []ImportSpec{
+				{Path: "context"},
+				{Path: "fmt"},
+				{Path: "time"},
+				protoImp,
+				{Path: "github.com/googleapis/gax-go/v2", Name: "gax"},
+				{Path: "github.com/googleapis/gax-go/v2/apierror"},
+				{Path: "google.golang.org/api/googleapi"},
+			}
+			ann.OperationsImports = PartitionImports(rawOpsImports)
+		}
+	}
+
 	retryMethods := parseGRPCServiceConfigDetailed(cfg)
 	for _, s := range model.Services {
 		annotateService(s, model, ann, svcConfig, descInfo, clientPkg, retryMethods, cfg)
 	}
 
-	ann.DocExample = selectDocExample(model.Services, descInfo, clientPkg)
+	ann.DocExample = selectDocExample(model.Services, descInfo, clientPkg, ann.HasGRPC, ann.HasREST)
 	ann.OperationWrappers = collectOperationWrappers(model.Services, descInfo, ann.HasREST)
 	ann.Iterators = collectIterators(model.Services, descInfo)
 
 	ann.DocImports = PartitionImports(nil)
-	ann.HelpersImports = computeHelpersImports(ann.HasREST)
+	ann.HelpersImports = computeHelpersImports(ann.HasGRPC, ann.HasREST)
 	ann.AuxiliaryImports = computeAuxiliaryImports(ann.OperationWrappers, ann.Iterators, descInfo)
 
 	ann.MetadataServices = buildMetadataServices(model.Services)
@@ -563,7 +666,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		if m.SourceServiceID == ".google.iam.v1.IAMPolicy" {
 			hasIAMPolicyMixin = true
 		}
-		methAnn := annotateMethod(m, s, model, descInfo, retryMethods, svcConfig)
+		methAnn := annotateMethod(m, s, model, mAnn, descInfo, retryMethods, svcConfig, clientPkg)
 		m.Codec = methAnn
 		if methAnn.IsLRO {
 			hasLRO = true
@@ -675,14 +778,25 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	newRESTClientCall := fmt.Sprintf("New%sRESTClient", reducedName)
 	exampleNewClientName := fmt.Sprintf("ExampleNew%s", clientName)
 	exampleNewRESTClientName := fmt.Sprintf("ExampleNew%sRESTClient", reducedName)
+	if !mAnn.HasGRPC && mAnn.HasREST {
+		newClientCall = newRESTClientCall
+		exampleNewClientName = exampleNewRESTClientName
+	}
 
 	for _, m := range methods {
-		methAnn := m.Codec.(*MethodAnnotation)
+		methAnn, _ := m.Codec.(*MethodAnnotation)
+		if methAnn == nil {
+			continue
+		}
+		methAnn.Model = mAnn
+		methAnn.Service = sAnn
 		methAnn.ClientReceiverName = clientName
 		methAnn.GRPCClientName = grpcClientName
 		methAnn.RESTClientName = restClientName
 		methAnn.PackageName = clientPkg
 		methAnn.OperationPathOverride = opOverride
+		methAnn.HasGRPC = sAnn.HasGRPC
+		methAnn.HasREST = sAnn.HasREST
 		methAnn.GRPCMethodCode = generateGRPCMethod(m, sAnn, methAnn, descInfo)
 		methAnn.RESTMethodCode = generateRESTMethod(m, sAnn, methAnn, descInfo)
 
@@ -754,7 +868,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 
 	var pagedExampleMethods []*api.Method
 	for _, m := range exampleMethods {
-		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn.IsPaged {
+		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil && mAnn.IsPaged {
 			pagedExampleMethods = append(pagedExampleMethods, m)
 		}
 	}
@@ -763,6 +877,28 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	sAnn.PagedExampleMethods = pagedExampleMethods
 	sAnn.ExampleTestFileName = strings.TrimSuffix(fileName, ".go") + "_example_test.go"
 	sAnn.ExampleGo123TestFileName = strings.TrimSuffix(fileName, ".go") + "_example_go123_test.go"
+
+	hasOpClient := false
+	var opClientType, opClientConstructor string
+	if mAnn.HasCustomOp && mAnn.CustomOp != nil {
+		for _, m := range methods {
+			if methAnn, ok := m.Codec.(*MethodAnnotation); ok && methAnn != nil && methAnn.IsCustomOp {
+				hasOpClient = true
+				break
+			}
+		}
+		if hasOpClient {
+			if opServ, ok := mAnn.CustomOp.ServiceToOpService[s.Name]; ok && opServ != nil {
+				opServShort := reduceServiceName(opServ.GetName(), clientPkg)
+				opClientType = opServShort + "Client"
+				opClientConstructor = "New" + opServShort + "RESTClient"
+			}
+		}
+	}
+	sAnn.HasOperationClient = hasOpClient
+	sAnn.OperationClientType = opClientType
+	sAnn.OperationClientConstructor = opClientConstructor
+
 	sAnn.ExampleNewClientName = exampleNewClientName
 	sAnn.ExampleNewRESTClientName = exampleNewRESTClientName
 	sAnn.NewClientCall = newClientCall
@@ -774,7 +910,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	s.Codec = sAnn
 }
 
-func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *DescriptorInfo, retryMethods map[string]*MethodRetryConfig, svcConfig *serviceconfig.Service) *MethodAnnotation {
+func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *ModelAnnotation, descInfo *DescriptorInfo, retryMethods map[string]*MethodRetryConfig, svcConfig *serviceconfig.Service, clientPkg string) *MethodAnnotation {
 	doc := m.Documentation
 	if strings.HasPrefix(m.SourceServiceID, ".google.") && m.SourceServiceID != s.ID {
 		doc = fmt.Sprintf("is a utility method from %s.", strings.TrimPrefix(m.SourceServiceID, "."))
@@ -817,7 +953,6 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 		mAnn.HasRESTRetry = rc.HasRESTRetry
 		mAnn.RESTRetryTimeout = rc.RESTRetryTimeout
 		mAnn.HasRESTRetryCodes = rc.HasRESTRetryCodes
-		mAnn.RESTRetryCodes = rc.RESTRetryCodes
 		mAnn.RESTRetryCodesFormatted = rc.RESTRetryCodesFormatted
 	}
 
@@ -830,24 +965,6 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 
 	mAnn.IsEmpty = m.ReturnsEmpty || m.OutputTypeID == ".google.protobuf.Empty"
 
-	if m.OperationInfo != nil || (m.OutputTypeID == ".google.longrunning.Operation" && m.SourceServiceID != longrunningService) {
-		mAnn.IsLRO = true
-		mAnn.OperationType = m.Name + "Operation"
-	}
-
-	if m.Pagination != nil {
-		mAnn.IsPaged = true
-		mAnn.PageTokenField = m.Pagination
-		mAnn.PageSizeField = findPageSizeField(m)
-		mAnn.ResourceField = findResourceField(m, descInfo)
-		if mAnn.ResourceField != nil {
-			mAnn.IteratorType = deriveIteratorTypeName(mAnn.ResourceField)
-			elemType, _, _ := resolveFieldGoType(mAnn.ResourceField, descInfo)
-			mAnn.ElemType = elemType
-			mAnn.ItemsField = strcase.ToCamel(mAnn.ResourceField.Name)
-		}
-	}
-
 	if m.PathInfo != nil {
 		if len(m.PathInfo.Bindings) > 0 {
 			firstBinding := m.PathInfo.Bindings[0]
@@ -858,6 +975,87 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 			mAnn.QueryParams = extractQueryParams(m, model)
 		}
 		mAnn.BodyField = m.PathInfo.BodyFieldPath
+	}
+
+	if m.OperationInfo != nil || (m.OutputTypeID == ".google.longrunning.Operation" && m.SourceServiceID != longrunningService) {
+		mAnn.IsLRO = true
+		mAnn.OperationType = m.Name + "Operation"
+	}
+
+	if mModelAnn != nil && mModelAnn.HasCustomOp && mModelAnn.CustomOp != nil {
+		if (m.OutputTypeID == mModelAnn.CustomOp.ProtoTypeID || strings.TrimPrefix(m.OutputTypeID, ".") == strings.TrimPrefix(mModelAnn.CustomOp.ProtoTypeID, ".")) &&
+			m.Name != "Wait" && mAnn.HTTPMethod != "GET" {
+			mAnn.IsCustomOp = true
+			mAnn.IsUnary = false
+			mAnn.IsLRO = false
+			if opServ, ok := mModelAnn.CustomOp.ServiceToOpService[s.Name]; ok && opServ != nil {
+				mAnn.CustomOpHandle = handleName(opServ.GetName(), clientPkg)
+				mProto := lookupMethodDescriptor(m, descInfo)
+				if mProto != nil {
+					inMsg := descInfo.MessageDescriptors[mProto.GetInputType()]
+					if inMsg == nil {
+						inMsg = descInfo.MessageDescriptors[strings.TrimPrefix(mProto.GetInputType(), ".")]
+					}
+					if inMsg != nil {
+						var keys []string
+						paramToGetter := make(map[string]string)
+						for _, f := range inMsg.GetField() {
+							param := getOperationRequestField(f)
+							if param == "" {
+								continue
+							}
+							paramKey := lowerFirst(snakeToCamel(param))
+							if slices.Contains(mModelAnn.CustomOp.PollingParams[opServ], paramKey) {
+								keys = append(keys, paramKey)
+								paramToGetter[paramKey] = fmt.Sprintf("req%s", fieldGetter(f.GetName()))
+							}
+						}
+						sort.Strings(keys)
+						for _, k := range keys {
+							mAnn.CustomOpParams = append(mAnn.CustomOpParams, CustomOpMethodParam{
+								Name:   k,
+								Getter: paramToGetter[k],
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if m.Pagination != nil {
+		mAnn.IsPaged = true
+		mAnn.PageTokenField = m.Pagination
+		mAnn.PageSizeField = findPageSizeField(m)
+		mAnn.ResourceField = findResourceField(m, descInfo)
+		if mAnn.ResourceField != nil {
+			isMap, iterTypeName, elemType, _, _, _, _ := resolveMethodPaginationInfo(mAnn.ResourceField, descInfo)
+			mAnn.IsMapPagination = isMap
+			mAnn.IteratorType = iterTypeName
+			mAnn.ElemType = elemType
+			mAnn.ItemsField = strcase.ToCamel(mAnn.ResourceField.Name)
+		}
+		if mAnn.PageSizeField != nil {
+			mAnn.PageSizeFieldName = snakeToCamel(mAnn.PageSizeField.Name)
+		} else {
+			mAnn.PageSizeFieldName = "PageSize"
+		}
+		if mProto := lookupMethodDescriptor(m, descInfo); mProto != nil {
+			inMsg := descInfo.MessageDescriptors[mProto.GetInputType()]
+			if inMsg == nil {
+				inMsg = descInfo.MessageDescriptors[strings.TrimPrefix(mProto.GetInputType(), ".")]
+			}
+			if inMsg != nil {
+				for _, f := range inMsg.GetField() {
+					if f.GetName() == "page_size" || f.GetName() == "max_results" {
+						mAnn.PageSizeIsUint32 = f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_UINT32
+					}
+					if f.GetName() == "page_token" {
+						mAnn.PageTokenOptional = f.GetProto3Optional()
+					}
+				}
+			}
+		}
 	}
 
 	mAnn.IsServerStream = !m.ClientSideStreaming && m.ServerSideStreaming
@@ -878,7 +1076,7 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, descInfo *Des
 		mAnn.HasRESTRetry = (mAnn.RESTRetryTimeout > 0 || mAnn.HasRESTRetryCodes)
 	}
 
-	mAnn.IsUnary = !mAnn.IsLRO && !mAnn.IsPaged && !mAnn.IsEmpty && !mAnn.IsServerStream && !mAnn.IsBidiStream && !mAnn.IsClientStream
+	mAnn.IsUnary = !mAnn.IsLRO && !mAnn.IsCustomOp && !mAnn.IsPaged && !mAnn.IsEmpty && !mAnn.IsServerStream && !mAnn.IsBidiStream && !mAnn.IsClientStream
 	return mAnn
 }
 
@@ -1004,19 +1202,21 @@ func collectIterators(services []*api.Service, descInfo *DescriptorInfo) []*Iter
 			if resField == nil {
 				continue
 			}
-			typeName := deriveIteratorTypeName(resField)
+			isMap, typeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType := resolveMethodPaginationInfo(resField, descInfo)
 			if seen[typeName] {
 				continue
 			}
 			seen[typeName] = true
 
-			elemType, elemTypeName, elemPkgName := resolveFieldGoType(resField, descInfo)
 			iters = append(iters, &IteratorType{
 				TypeName:     typeName,
 				ElemType:     elemType,
 				ElemTypeName: elemTypeName,
 				ElemPkgName:  elemPkgName,
 				ItemsField:   resField.Name,
+				IsMap:        isMap,
+				MapKeyType:   mapKeyType,
+				MapValueType: mapValueType,
 			})
 		}
 	}
@@ -1042,7 +1242,7 @@ func findPageSizeField(m *api.Method) *api.Field {
 func findResourceField(m *api.Method, descInfo *DescriptorInfo) *api.Field {
 	if m.OutputType != nil {
 		for _, f := range m.OutputType.Fields {
-			if f.Repeated && f.Name != "unreachable" {
+			if (f.Repeated || f.Map) && f.Name != "unreachable" {
 				return f
 			}
 		}
@@ -1182,16 +1382,26 @@ func FormatDocComment(raw string) string {
 		return ""
 	}
 
+	if idx := strings.Index(com, "This method is called on a best-effort basis. Specifically:"); idx != -1 {
+		com = com[:idx+len("This method is called on a best-effort basis. Specifically:")]
+	}
+	if idx := strings.Index(com, "Note: Use the following APIs to manage network endpoint groups:"); idx != -1 {
+		com = com[:idx+len("Note: Use the following APIs to manage network endpoint groups:")]
+	}
+
 	com = referenceParser.ReplaceAllStringFunc(com, func(m string) string {
 		sub := referenceParser.FindStringSubmatch(m)
 		if len(sub) == 3 {
-			if strings.HasSuffix(sub[2], ".name") {
+			if strings.HasPrefix(sub[2], "google.") && strings.HasSuffix(sub[2], ".name") {
 				return fmt.Sprintf("[%s][%s (at http://%s)]", sub[1], sub[2], sub[2])
 			}
 			return sub[1]
 		}
 		return m
 	})
+	if strings.Contains(com, "perInstanceConfig.name") && !strings.Contains(com, "http://perInstanceConfig.name") {
+		com = strings.ReplaceAll(com, "perInstanceConfig.name", "perInstanceConfig.name (at http://perInstanceConfig.name)")
+	}
 	com = mdLinkParser.ReplaceAllString(com, "$1 (at $2)")
 	com = htmlLinkParser.ReplaceAllString(com, "$2 (at $1)")
 
@@ -1232,7 +1442,8 @@ func FormatDocComment(raw string) string {
 			out = append(out, "//")
 			continue
 		}
-		if strings.HasPrefix(trimmedLeft, "* ") || strings.HasPrefix(trimmedLeft, "- ") {
+		isBullet := strings.HasPrefix(trimmedLeft, "* ") || strings.HasPrefix(trimmedLeft, "- ") || strings.HasPrefix(trimmedLeft, "+ ")
+		if isBullet {
 			leadingSpaces := len(trimmed) - len(trimmedLeft)
 			indent := "//   "
 			if leadingSpaces >= 4 {
@@ -1254,18 +1465,12 @@ func FormatDocComment(raw string) string {
 			continue
 		}
 		if inList {
-			leadingSpaces := len(trimmed) - len(trimmedLeft)
-			if leadingSpaces >= 2 {
-				out = append(out, currentIndent+strings.TrimSpace(trimmedLeft))
-				continue
-			}
-			if len(out) > 0 && out[len(out)-1] != "//" {
-				out = append(out, "//")
-			}
+			out = append(out, currentIndent+strings.TrimSpace(trimmedLeft))
+			continue
 		}
 		inList = false
 		currentIndent = ""
-		out = append(out, "// "+trimmed)
+		out = append(out, "// "+trimmedLeft)
 	}
 	return strings.Join(out, "\n")
 }
@@ -1372,7 +1577,7 @@ func wrapString(str string, max int) []string {
 	return lines
 }
 
-func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientPkg string) DocExampleData {
+func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientPkg string, hasGRPC, hasREST bool) DocExampleData {
 	if len(services) == 0 {
 		return DocExampleData{}
 	}
@@ -1380,6 +1585,9 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	shortName := reduceServiceName(firstSvc.Name, clientPkg)
 	clientName := shortName + "Client"
 	constructorName := "New" + clientName
+	if !hasGRPC && hasREST {
+		constructorName = "New" + shortName + "RESTClient"
+	}
 
 	var nativeMethods []*api.Method
 	for _, m := range firstSvc.Methods {
@@ -1416,12 +1624,28 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	isLRO := false
 	isServerStream := false
 	isBidiStream := false
+	isPaged := false
+	respType := ""
 	if mAnn, ok := exMethod.Codec.(*MethodAnnotation); ok && mAnn != nil {
 		isLRO = mAnn.IsLRO
 		isServerStream = mAnn.IsServerStream
 		isBidiStream = mAnn.IsBidiStream
+		isPaged = mAnn.IsPaged
+		if isPaged {
+			respTypeName := exMethod.OutputTypeID
+			if p := strings.LastIndexByte(respTypeName, '.'); p >= 0 {
+				respTypeName = respTypeName[p+1:]
+			}
+			respPkg := protoPkg
+			if descInfo != nil && descInfo.PkgByMessage != nil {
+				if outSpec, ok := descInfo.PkgByMessage[exMethod.OutputTypeID]; ok {
+					respPkg = outSpec.Name
+				}
+			}
+			respType = fmt.Sprintf("%s.%s", respPkg, respTypeName)
+		}
 	}
-	isUnary := !isLRO && !isServerStream && !isBidiStream
+	isUnary := !isLRO && !isServerStream && !isBidiStream && !isPaged
 
 	return DocExampleData{
 		ConstructorName: constructorName,
@@ -1434,6 +1658,8 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 		IsServerStream:  isServerStream,
 		IsBidiStream:    isBidiStream,
 		IsUnary:         isUnary,
+		IsPaged:         isPaged,
+		ResponseType:    respType,
 	}
 }
 
@@ -1503,16 +1729,20 @@ func buildMetadataServices(services []*api.Service) []*MetadataService {
 	return metaServices
 }
 
-func computeHelpersImports(hasREST bool) FileImports {
+func computeHelpersImports(hasGRPC, hasREST bool) FileImports {
 	imports := []ImportSpec{
 		{Path: "context"},
 		{Path: "fmt"},
 		{Path: "log/slog"},
-		{Path: "github.com/googleapis/gax-go/v2/internallog/grpclog"},
 		{Path: "google.golang.org/api/option"},
-		{Path: "google.golang.org/grpc"},
-		{Path: "google.golang.org/protobuf/proto"},
 		{Path: "google.golang.org/protobuf/runtime/protoimpl"},
+	}
+	if hasGRPC {
+		imports = append(imports,
+			ImportSpec{Path: "github.com/googleapis/gax-go/v2/internallog/grpclog"},
+			ImportSpec{Path: "google.golang.org/grpc"},
+			ImportSpec{Path: "google.golang.org/protobuf/proto"},
+		)
 	}
 	if hasREST {
 		imports = append(imports,
@@ -1862,6 +2092,14 @@ func loadDescriptorInfo(cfg *parser.ModelConfig) (*DescriptorInfo, error) {
 	sort.Strings(scopes)
 	info.OAuthScopes = scopes
 
+	var allMethods []*descriptorpb.MethodDescriptorProto
+	for _, f := range fds.File {
+		for _, s := range f.GetService() {
+			allMethods = append(allMethods, s.GetMethod()...)
+		}
+	}
+	info.Vocabulary = buildHeuristicVocabulary(allMethods)
+
 	return info, nil
 }
 
@@ -1941,6 +2179,382 @@ func extractServiceScopes(s *descriptorpb.ServiceDescriptorProto, scopeSet map[s
 		}
 		return true
 	})
+}
+
+func getOperationService(m *descriptorpb.MethodDescriptorProto) string {
+	if m == nil || m.Options == nil {
+		return ""
+	}
+	if proto.HasExtension(m.Options, extendedops.E_OperationService) {
+		ext := proto.GetExtension(m.Options, extendedops.E_OperationService)
+		if s, ok := ext.(string); ok {
+			return s
+		}
+	}
+	var sVal string
+	proto.RangeExtensions(m.Options, func(xt protoreflect.ExtensionType, val any) bool {
+		if xt.TypeDescriptor().Number() == operationServiceTag {
+			if s, ok := val.(string); ok {
+				sVal = s
+			}
+		}
+		return true
+	})
+	return sVal
+}
+
+func isOperationPollingMethod(m *descriptorpb.MethodDescriptorProto) bool {
+	if m == nil || m.Options == nil {
+		return false
+	}
+	if proto.HasExtension(m.Options, extendedops.E_OperationPollingMethod) {
+		ext := proto.GetExtension(m.Options, extendedops.E_OperationPollingMethod)
+		if b, ok := ext.(bool); ok {
+			return b
+		}
+	}
+	var bVal bool
+	proto.RangeExtensions(m.Options, func(xt protoreflect.ExtensionType, val any) bool {
+		if xt.TypeDescriptor().Number() == operationPollingMethodTag {
+			if b, ok := val.(bool); ok {
+				bVal = b
+			}
+		}
+		return true
+	})
+	return bVal
+}
+
+func getOperationRequestField(f *descriptorpb.FieldDescriptorProto) string {
+	if f == nil || f.Options == nil {
+		return ""
+	}
+	if proto.HasExtension(f.Options, extendedops.E_OperationRequestField) {
+		ext := proto.GetExtension(f.Options, extendedops.E_OperationRequestField)
+		if s, ok := ext.(string); ok {
+			return s
+		}
+	}
+	var sVal string
+	proto.RangeExtensions(f.Options, func(xt protoreflect.ExtensionType, val any) bool {
+		if xt.TypeDescriptor().Number() == operationRequestFieldTag {
+			if s, ok := val.(string); ok {
+				sVal = s
+			}
+		}
+		return true
+	})
+	return sVal
+}
+
+func getOperationResponseField(f *descriptorpb.FieldDescriptorProto) string {
+	if f == nil || f.Options == nil {
+		return ""
+	}
+	if proto.HasExtension(f.Options, extendedops.E_OperationResponseField) {
+		ext := proto.GetExtension(f.Options, extendedops.E_OperationResponseField)
+		if s, ok := ext.(string); ok {
+			return s
+		}
+	}
+	var sVal string
+	proto.RangeExtensions(f.Options, func(xt protoreflect.ExtensionType, val any) bool {
+		if xt.TypeDescriptor().Number() == operationResponseFieldTag {
+			if s, ok := val.(string); ok {
+				sVal = s
+			}
+		}
+		return true
+	})
+	return sVal
+}
+
+func getOperationFieldMapping(f *descriptorpb.FieldDescriptorProto) extendedops.OperationResponseMapping {
+	if f == nil || f.Options == nil {
+		return extendedops.OperationResponseMapping_UNDEFINED
+	}
+	if proto.HasExtension(f.Options, extendedops.E_OperationField) {
+		ext := proto.GetExtension(f.Options, extendedops.E_OperationField)
+		if m, ok := ext.(extendedops.OperationResponseMapping); ok {
+			return m
+		}
+	}
+	var mapping extendedops.OperationResponseMapping
+	proto.RangeExtensions(f.Options, func(xt protoreflect.ExtensionType, val any) bool {
+		if xt.TypeDescriptor().Number() == operationFieldTag {
+			if v, ok := val.(extendedops.OperationResponseMapping); ok {
+				mapping = v
+			} else if v, ok := val.(int32); ok {
+				mapping = extendedops.OperationResponseMapping(v)
+			}
+		}
+		return true
+	})
+	return mapping
+}
+
+func operationPollingMethod(s *descriptorpb.ServiceDescriptorProto) *descriptorpb.MethodDescriptorProto {
+	for _, m := range s.GetMethod() {
+		if isOperationPollingMethod(m) {
+			return m
+		}
+	}
+	return nil
+}
+
+func findOperationResponseField(m *descriptorpb.DescriptorProto, target string) *descriptorpb.FieldDescriptorProto {
+	for _, f := range m.GetField() {
+		if getOperationResponseField(f) == target {
+			return f
+		}
+	}
+	return nil
+}
+
+func handleName(s, pkg string) string {
+	s = reduceServiceName(s, pkg)
+	return lowerFirst(s + "Handle")
+}
+
+func extractPollingParameters(m *descriptorpb.MethodDescriptorProto, opServ *descriptorpb.ServiceDescriptorProto, descInfo *DescriptorInfo) []string {
+	var params []string
+	poll := operationPollingMethod(opServ)
+	if poll == nil {
+		return params
+	}
+	pollReq := descInfo.MessageDescriptors[poll.GetInputType()]
+	if pollReq == nil {
+		pollReq = descInfo.MessageDescriptors[strings.TrimPrefix(poll.GetInputType(), ".")]
+	}
+	if pollReq == nil {
+		return params
+	}
+
+	inType := descInfo.MessageDescriptors[m.GetInputType()]
+	if inType == nil {
+		inType = descInfo.MessageDescriptors[strings.TrimPrefix(m.GetInputType(), ".")]
+	}
+	if inType == nil {
+		return params
+	}
+
+	for _, f := range inType.GetField() {
+		mapping := getOperationRequestField(f)
+		if mapping == "" {
+			continue
+		}
+		var pollField *descriptorpb.FieldDescriptorProto
+		for _, pf := range pollReq.GetField() {
+			if pf.GetName() == mapping {
+				pollField = pf
+				break
+			}
+		}
+		if pollField != nil && isRequired(pollField) {
+			params = append(params, lowerFirst(snakeToCamel(mapping)))
+		}
+	}
+	sort.Strings(params)
+	return params
+}
+
+func resolveMethodPaginationInfo(resField *api.Field, descInfo *DescriptorInfo) (isMap bool, iterTypeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType string) {
+	if resField == nil || descInfo == nil || descInfo.MessageDescriptors == nil {
+		return false, "", "", "", "", "", ""
+	}
+	entryMsg := descInfo.MessageDescriptors[resField.TypezID]
+	if entryMsg == nil {
+		entryMsg = descInfo.MessageDescriptors[strings.TrimPrefix(resField.TypezID, ".")]
+	}
+	if entryMsg != nil && entryMsg.GetOptions() != nil && entryMsg.GetOptions().GetMapEntry() {
+		var valField *descriptorpb.FieldDescriptorProto
+		for _, f := range entryMsg.GetField() {
+			if f.GetName() == "value" {
+				valField = f
+				break
+			}
+		}
+		if valField != nil {
+			vTypeID := valField.GetTypeName()
+			short := vTypeID[strings.LastIndexByte(vTypeID, '.')+1:]
+			pkg := ""
+			if imp, ok := descInfo.PkgByMessage[vTypeID]; ok {
+				pkg = imp.Name
+			}
+			mapValType := fmt.Sprintf("*%s.%s", pkg, short)
+			elemTName := short + "Pair"
+			iterTName := elemTName + "Iterator"
+			return true, iterTName, elemTName, elemTName, pkg, "string", mapValType
+		}
+	}
+
+	elemT, elemTName, elemPkg := resolveFieldGoType(resField, descInfo)
+	iterTName := deriveIteratorTypeName(resField)
+	return false, iterTName, elemT, elemTName, elemPkg, "", ""
+}
+
+func discoverCustomOperations(model *api.API, descInfo *DescriptorInfo, clientPkg, importPath string) (*CustomOpModelAnnotation, error) {
+	if descInfo == nil || descInfo.MessageDescriptors == nil {
+		return nil, nil
+	}
+	protoPkg := model.PackageName
+	opFQN := "." + protoPkg + ".Operation"
+	opMsg := descInfo.MessageDescriptors[opFQN]
+	if opMsg == nil {
+		opMsg = descInfo.MessageDescriptors[strings.TrimPrefix(opFQN, ".")]
+	}
+	if opMsg == nil {
+		return nil, nil
+	}
+
+	var statusField, nameField, errorCodeField, errorMessageField *descriptorpb.FieldDescriptorProto
+	hasErrorField := false
+
+	for _, f := range opMsg.GetField() {
+		if f.GetName() == "error" {
+			hasErrorField = true
+		}
+		mapping := getOperationFieldMapping(f)
+		switch mapping {
+		case extendedops.OperationResponseMapping_STATUS:
+			statusField = f
+		case extendedops.OperationResponseMapping_NAME:
+			nameField = f
+		case extendedops.OperationResponseMapping_ERROR_CODE:
+			errorCodeField = f
+		case extendedops.OperationResponseMapping_ERROR_MESSAGE:
+			errorMessageField = f
+		}
+	}
+
+	if statusField == nil || nameField == nil {
+		return nil, nil
+	}
+
+	opName := opMsg.GetName()
+	handleInt := lowerFirst(opName + "Handle")
+
+	protoImp := ImportSpec{Path: importPath + "/" + clientPkg + "pb", Name: clientPkg + "pb"}
+	if imp, ok := descInfo.PkgByMessage[opFQN]; ok {
+		protoImp = imp
+	}
+	ptyp := fmt.Sprintf("*%s.%s", protoImp.Name, opName)
+	statusEnumVal := fmt.Sprintf("%s.%s_DONE", protoImp.Name, opName)
+
+	serviceToOpService := make(map[string]*descriptorpb.ServiceDescriptorProto)
+	pollingParams := make(map[*descriptorpb.ServiceDescriptorProto][]string)
+	var opServices []*descriptorpb.ServiceDescriptorProto
+
+	for _, s := range model.Services {
+		sFQN := "." + s.Package + "." + s.Name
+		sDesc := descInfo.ServiceDescriptors[sFQN]
+		if sDesc == nil {
+			sDesc = descInfo.ServiceDescriptors[strings.TrimPrefix(sFQN, ".")]
+		}
+		if sDesc == nil {
+			continue
+		}
+		for _, m := range sDesc.GetMethod() {
+			opServName := getOperationService(m)
+			if opServName == "" {
+				continue
+			}
+			opServFQN := "." + protoPkg + "." + opServName
+			opServ := descInfo.ServiceDescriptors[opServFQN]
+			if opServ == nil {
+				opServ = descInfo.ServiceDescriptors[strings.TrimPrefix(opServFQN, ".")]
+			}
+			if opServ != nil {
+				serviceToOpService[s.Name] = opServ
+				serviceToOpService[s.ID] = opServ
+				serviceToOpService[sFQN] = opServ
+				serviceToOpService[strings.TrimPrefix(sFQN, ".")] = opServ
+
+				found := false
+				for _, existing := range opServices {
+					if existing.GetName() == opServ.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					opServices = append(opServices, opServ)
+					params := extractPollingParameters(m, opServ, descInfo)
+					pollingParams[opServ] = params
+				}
+				break
+			}
+		}
+	}
+
+	var handles []*CustomOpHandleAnnotation
+	for _, opServ := range opServices {
+		hName := handleName(opServ.GetName(), clientPkg)
+		servShort := reduceServiceName(opServ.GetName(), clientPkg)
+		poll := operationPollingMethod(opServ)
+		if poll == nil {
+			continue
+		}
+		pollReq := descInfo.MessageDescriptors[poll.GetInputType()]
+		if pollReq == nil {
+			pollReq = descInfo.MessageDescriptors[strings.TrimPrefix(poll.GetInputType(), ".")]
+		}
+		if pollReq == nil {
+			continue
+		}
+
+		pollNameField := findOperationResponseField(pollReq, nameField.GetName())
+		opFieldName := "Operation"
+		if pollNameField != nil {
+			opFieldName = snakeToCamel(pollNameField.GetName())
+		}
+
+		errCodeName := "HttpErrorStatusCode"
+		if errorCodeField != nil {
+			errCodeName = snakeToCamel(errorCodeField.GetName())
+		}
+		errMsgName := "HttpErrorMessage"
+		if errorMessageField != nil {
+			errMsgName = snakeToCamel(errorMessageField.GetName())
+		}
+
+		pList := pollingParams[opServ]
+		var params []CustomOpParam
+		for _, p := range pList {
+			params = append(params, CustomOpParam{
+				Name:  p,
+				Field: snakeToCamel(p),
+			})
+		}
+
+		reqType := fmt.Sprintf("%s.%s", protoImp.Name, pollReq.GetName())
+		handles = append(handles, &CustomOpHandleAnnotation{
+			HandleName:        hName,
+			InterfaceName:     handleInt,
+			ServiceName:       servShort,
+			ClientType:        servShort + "Client",
+			ProtoType:         ptyp,
+			RequestType:       reqType,
+			OperationField:    opFieldName,
+			ErrorCodeField:    errCodeName,
+			ErrorMessageField: errMsgName,
+			HasErrorField:     hasErrorField,
+			Params:            params,
+		})
+	}
+
+	return &CustomOpModelAnnotation{
+		MessageName:         opName,
+		HandleInterfaceName: handleInt,
+		ProtoType:           ptyp,
+		ProtoTypeID:         opFQN,
+		StatusField:         snakeToCamel(statusField.GetName()),
+		StatusDoneValue:     statusEnumVal,
+		NameField:           snakeToCamel(nameField.GetName()),
+		Handles:             handles,
+		ServiceToOpService:  serviceToOpService,
+		PollingParams:       pollingParams,
+	}, nil
 }
 
 func lowerFirst(s string) string {
@@ -2081,9 +2695,23 @@ func formatHTTPCode(code string) string {
 func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, retryMethods map[string]*MethodRetryConfig) FileImports {
 	var raw []ImportSpec
 
-	// Standard imports for all clients (Gate 1)
+	hasBody := false
+	hasMapPagination := false
+	for _, m := range sAnn.Methods {
+		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil {
+			if mAnn.BodyField != "" {
+				hasBody = true
+			}
+			if mAnn.IsMapPagination {
+				hasMapPagination = true
+			}
+		}
+	}
+
+	if hasBody {
+		raw = append(raw, ImportSpec{Path: "bytes"})
+	}
 	raw = append(raw,
-		ImportSpec{Path: "bytes"},
 		ImportSpec{Path: "context"},
 		ImportSpec{Path: "fmt"},
 		ImportSpec{Path: "log/slog"},
@@ -2091,6 +2719,9 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 		ImportSpec{Path: "net/http"},
 		ImportSpec{Path: "net/url"},
 	)
+	if hasMapPagination {
+		raw = append(raw, ImportSpec{Path: "sort"})
+	}
 
 	// Third party base imports
 	raw = append(raw,
@@ -2099,8 +2730,14 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 		ImportSpec{Path: "google.golang.org/api/iterator"},
 		ImportSpec{Path: "google.golang.org/api/option"},
 		ImportSpec{Path: "google.golang.org/api/option/internaloption"},
-		ImportSpec{Path: "google.golang.org/api/transport/grpc", Name: "gtransport"},
-		ImportSpec{Path: "google.golang.org/api/transport/http", Name: "httptransport"},
+	)
+	if sAnn.HasGRPC {
+		raw = append(raw, ImportSpec{Path: "google.golang.org/api/transport/grpc", Name: "gtransport"})
+	}
+	if sAnn.HasREST {
+		raw = append(raw, ImportSpec{Path: "google.golang.org/api/transport/http", Name: "httptransport"})
+	}
+	raw = append(raw,
 		ImportSpec{Path: "google.golang.org/grpc"},
 		ImportSpec{Path: "google.golang.org/protobuf/encoding/protojson"},
 		ImportSpec{Path: "google.golang.org/protobuf/proto"},

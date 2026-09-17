@@ -105,6 +105,17 @@ func main() {
 	}
 {{/Codec.LROHasResponse}}
 {{/Codec.IsLRO}}
+{{#Codec.IsCustomOp}}
+	op, err := c.{{Name}}(ctx, req)
+	if err != nil {
+		// TODO: Handle error.
+	}
+
+	err = op.Wait(ctx)
+	if err != nil {
+		// TODO: Handle error.
+	}
+{{/Codec.IsCustomOp}}
 {{#Codec.IsEmpty}}
 	err = c.{{Name}}(ctx, req)
 	if err != nil {

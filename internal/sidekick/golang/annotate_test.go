@@ -595,8 +595,8 @@ func TestAnnotateRun(t *testing.T) {
 }
 
 func TestComputeHelpersImportsGating(t *testing.T) {
-	// When HasREST is true, all HTTP and gRPC imports must be present.
-	restImports := computeHelpersImports(true)
+	// When HasGRPC is true and HasREST is true, all HTTP and gRPC imports must be present.
+	restImports := computeHelpersImports(true, true)
 	if len(restImports.Standard) != 5 {
 		t.Errorf("expected 5 standard imports when HasREST=true, got %d: %v", len(restImports.Standard), restImports.Standard)
 	}
@@ -633,7 +633,7 @@ func TestComputeHelpersImportsGating(t *testing.T) {
 	}
 
 	// When HasREST is false, HTTP imports (net/http, googleapi, io, internallog) must be omitted.
-	noRestImports := computeHelpersImports(false)
+	noRestImports := computeHelpersImports(true, false)
 	if len(noRestImports.Standard) != 3 {
 		t.Errorf("expected 3 standard imports when HasREST=false, got %d: %v", len(noRestImports.Standard), noRestImports.Standard)
 	}
@@ -661,6 +661,38 @@ func TestComputeHelpersImportsGating(t *testing.T) {
 	}
 	if !slices.Contains(noRestThirdPaths, "github.com/googleapis/gax-go/v2/internallog/grpclog") {
 		t.Errorf("expected grpclog to be retained in no-REST imports: %v", noRestThirdPaths)
+	}
+
+	// When HasGRPC is false and HasREST is true (e.g. DIREGAPIC), gRPC imports must be omitted.
+	diregapicImports := computeHelpersImports(false, true)
+	if len(diregapicImports.Standard) != 5 {
+		t.Errorf("expected 5 standard imports when HasGRPC=false, HasREST=true, got %d", len(diregapicImports.Standard))
+	}
+	if len(diregapicImports.ThirdParty) != 4 {
+		t.Errorf("expected 4 third-party imports when HasGRPC=false, HasREST=true, got %d: %v", len(diregapicImports.ThirdParty), diregapicImports.ThirdParty)
+	}
+	var direThirdPaths []string
+	for _, imp := range diregapicImports.ThirdParty {
+		direThirdPaths = append(direThirdPaths, imp.Path)
+	}
+	for _, want := range []string{
+		"github.com/googleapis/gax-go/v2/internallog",
+		"google.golang.org/api/googleapi",
+		"google.golang.org/api/option",
+		"google.golang.org/protobuf/runtime/protoimpl",
+	} {
+		if !slices.Contains(direThirdPaths, want) {
+			t.Errorf("expected diregapic imports to contain %q, got %v", want, direThirdPaths)
+		}
+	}
+	for _, unwanted := range []string{
+		"github.com/googleapis/gax-go/v2/internallog/grpclog",
+		"google.golang.org/grpc",
+		"google.golang.org/protobuf/proto",
+	} {
+		if slices.Contains(direThirdPaths, unwanted) {
+			t.Errorf("unwanted %q found in diregapic imports: %v", unwanted, direThirdPaths)
+		}
 	}
 }
 
@@ -836,5 +868,58 @@ func TestExtractQueryParamsCycleDetection(t *testing.T) {
 	params := extractQueryParams(m, model)
 	if !slices.Contains(params, "val") {
 		t.Errorf("expected params to contain %q, got: %v", "val", params)
+	}
+}
+
+func TestComputeDocCommentFormatting(t *testing.T) {
+	tests := []struct {
+		name       string
+		methodName string
+		raw        string
+		want       string
+	}{
+		{
+			name:       "truncate 4-space markdown blocks after Specifically:",
+			methodName: "Wait",
+			raw: "Waits for the specified Operation resource to return as DONE.\n\nThis method is called on a best-effort basis. Specifically:\n\n\n    - In uncommon cases, when the server is overloaded, the request might\n    return before the default deadline is reached.",
+			want: "// Wait waits for the specified Operation resource to return as DONE.\n//\n// This method is called on a best-effort basis. Specifically:",
+		},
+		{
+			name:       "truncate 4-space markdown blocks after Note: Use the following APIs to manage network endpoint groups:",
+			methodName: "Insert",
+			raw: "Creates a network endpoint group in the specified project.\n\nNote: Use the following APIs to manage network endpoint groups:\n\n    -\n    To manage NEGs with zonal scope: zonal API",
+			want: "// Insert creates a network endpoint group in the specified project.\n//\n// Note: Use the following APIs to manage network endpoint groups:",
+		},
+		{
+			name:       "autolink perInstanceConfig.name domain",
+			methodName: "UpdatePerInstanceConfigs",
+			raw: "Inserts or updates per-instance configurations. perInstanceConfig.name serves as a key used to distinguish whether to perform insert or patch.",
+			want: "// UpdatePerInstanceConfigs inserts or updates per-instance configurations. perInstanceConfig.name (at http://perInstanceConfig.name) serves as a key used to distinguish whether to perform insert or patch.",
+		},
+		{
+			name:       "plus bullet list items and continuation",
+			methodName: "Resize",
+			raw: "Resize selection including:\n\n+ The status of the VM instance.\n+ The health of the VM instance.\ncontinuation of health.",
+			want: "// Resize resize selection including:\n//\n//   The status of the VM instance.\n//\n//   The health of the VM instance.\n//   continuation of health.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatMethodDoc(tt.methodName, tt.raw, false)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("FormatMethodDoc mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestComputeSnippetResultTypeCustomOp(t *testing.T) {
+	mAnn := &MethodAnnotation{
+		IsCustomOp: true,
+	}
+	got := computeSnippetResultType(mAnn)
+	if got != "*Operation" {
+		t.Errorf("expected *Operation, got %q", got)
 	}
 }

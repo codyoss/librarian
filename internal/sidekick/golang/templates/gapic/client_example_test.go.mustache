@@ -43,6 +43,7 @@ import (
 {{/Codec.ExampleImports.ThirdParty}}
 )
 
+{{#Codec.HasGRPC}}
 func {{Codec.ExampleNewClientName}}() {
 	ctx := context.Background()
 	// This snippet has been automatically generated and should be regarded as a code template only.
@@ -59,6 +60,7 @@ func {{Codec.ExampleNewClientName}}() {
 	// TODO: Use client.
 	_ = c
 }
+{{/Codec.HasGRPC}}
 {{#Codec.HasREST}}
 
 func {{Codec.ExampleNewRESTClientName}}() {
@@ -167,6 +169,17 @@ func {{Codec.ExampleFunctionName}}() {
 	}
 {{/Codec.LROHasResponse}}
 {{/Codec.IsLRO}}
+{{#Codec.IsCustomOp}}
+	op, err := c.{{Name}}(ctx, req)
+	if err != nil {
+		// TODO: Handle error.
+	}
+
+	err = op.Wait(ctx)
+	if err != nil {
+		// TODO: Handle error.
+	}
+{{/Codec.IsCustomOp}}
 {{#Codec.IsEmpty}}
 	err = c.{{Name}}(ctx, req)
 	if err != nil {
