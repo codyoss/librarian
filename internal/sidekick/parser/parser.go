@@ -63,6 +63,11 @@ type ModelConfig struct {
 	// Resource heuristic enablement
 	ResourceNameHeuristic bool
 
+	// AllowMultiPackage indicates that the model is permitted to span multiple
+	// protobuf packages (for example, when compound APIs include nested proto
+	// files across packages). When false, api.Validate enforces single-package uniformity.
+	AllowMultiPackage bool
+
 	// Model overrides
 	Override api.ModelOverride
 }
@@ -102,9 +107,15 @@ func CreateModel(cfg *ModelConfig) (*api.API, error) {
 	if err := api.PatchDocumentation(model, cfg.CommentOverrides); err != nil {
 		return nil, err
 	}
-	// Verify all the services, messages and enums are in the same package.
-	if err := api.Validate(model); err != nil {
-		return nil, err
+	// Verify all services, messages, and enums belong to valid packages.
+	if !cfg.AllowMultiPackage {
+		if err := api.Validate(model); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := validateMultiPackage(model); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Override.Name != "" {
 		model.Name = cfg.Override.Name
@@ -116,4 +127,29 @@ func CreateModel(cfg *ModelConfig) (*api.API, error) {
 		model.Description = cfg.Override.Description
 	}
 	return model, nil
+}
+
+func validateMultiPackage(model *api.API) error {
+	allowed := map[string]bool{
+		model.PackageName:       true,
+		"google.cloud.location": true,
+		"google.iam.v1":         true,
+		"google.longrunning":    true,
+	}
+	for _, s := range model.Services {
+		allowed[s.Package] = true
+	}
+	for _, m := range model.Messages {
+		if !allowed[m.Package] {
+			return fmt.Errorf("sidekick requires all top-level elements to be in a known service or mixin package want=%q, got=%q for %q",
+				model.PackageName, m.Package, m.ID)
+		}
+	}
+	for _, e := range model.Enums {
+		if !allowed[e.Package] {
+			return fmt.Errorf("sidekick requires all top-level elements to be in a known service or mixin package want=%q, got=%q for %q",
+				model.PackageName, e.Package, e.ID)
+		}
+	}
+	return nil
 }

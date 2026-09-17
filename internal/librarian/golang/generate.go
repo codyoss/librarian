@@ -141,7 +141,7 @@ func Generate(ctx context.Context, cfg *config.Config, library *config.Library, 
 	if toolchain != "" {
 		env = map[string]string{"GOTOOLCHAIN": toolchain}
 	}
-	return runInDirWithEnv(ctx, outDir, env, command.Go, "mod", "tidy")
+	return runInDirWithEnv(ctx, outDir, env, command.Go, "mod", "tidy", "-e")
 }
 
 func isNativeGenerator() bool {
@@ -257,6 +257,8 @@ func generateNativeGAPIC(ctx context.Context, apiPath string, goAPI *config.GoAP
 	}
 	if trans := transport(sc); trans != "" {
 		codecMap["transport"] = string(trans)
+	} else {
+		codecMap["transport"] = "grpc"
 	}
 	if !goAPI.NoSnippets {
 		snippetsDir := filepath.Join(outDir, "cloud.google.com", "go", "internal", "generated", "snippets", goAPI.ImportPath)
@@ -285,8 +287,9 @@ func generateNativeGAPIC(ctx context.Context, apiPath string, goAPI *config.GoAP
 			Sources:     &sources.Sources{Googleapis: googleapisDir},
 			ActiveRoots: []string{"googleapis"},
 		},
-		Protoc: pc,
-		Codec:  codecMap,
+		Protoc:            pc,
+		Codec:             codecMap,
+		AllowMultiPackage: len(goAPI.NestedProtos) > 0,
 	}
 
 	model, err := parser.CreateModel(modelConfig)

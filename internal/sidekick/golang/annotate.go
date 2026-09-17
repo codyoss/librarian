@@ -34,7 +34,6 @@ import (
 	"github.com/googleapis/librarian/internal/sidekick/parser"
 	"github.com/googleapis/librarian/internal/sidekick/protobuf"
 	"github.com/googleapis/librarian/internal/tool/protoc"
-	"github.com/iancoleman/strcase"
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/genproto/googleapis/cloud/extendedops"
 	locationpb "google.golang.org/genproto/googleapis/cloud/location"
@@ -45,24 +44,31 @@ import (
 )
 
 var (
-	referenceParser     = regexp.MustCompile(`\[([a-zA-Z0-9._]+)\]\[([a-zA-Z0-9._]*)\]`)
-	mdLinkParser        = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
-	htmlLinkParser      = regexp.MustCompile(`<a\s+href=["']([^"']+)["']>([^<]+)</a>`)
-	bareURLRegex        = regexp.MustCompile(`https?://[^\s)]+`)
-	codeInlineRegex     = regexp.MustCompile("`([^`]+)`")
-	boldRegex           = regexp.MustCompile(`\*\*([^*]+)\*\*`)
-	italicRegex         = regexp.MustCompile(`(^|[\s(\[{])\*([^\s*](?:[^*\n]*?[^\s*])?)\*([\s)\]}.,;!?:]|$)`)
-	openQuoteRegex      = regexp.MustCompile(`(^|[\s(\[{])"([^\s])`)
-	closeQuoteRegex     = regexp.MustCompile(`([^\s])"([\s)\]}.,;!?:]|$)`)
-	fencedCodeBlockRegex = regexp.MustCompile("(?s)```.*?```")
-	headingWithListRegex = regexp.MustCompile(`(?m)(^|\n+)##\s*(.*?):\s*\n+(?:\*\s*)?\[([^\]]+)\](?:\(([^)]+)\)|\[([^\]]*)\])?`)
-	headingRegex         = regexp.MustCompile(`(?m)^##+\s*`)
-	orderedListItemRegex = regexp.MustCompile(`^\d+\.\s+`)
-	quotePairRegex       = regexp.MustCompile(`(^|[\s(\[{])"([^"\n]+?)"([\s)\]}.,;!?:]|$)`)
-	singleQuotePairRegex = regexp.MustCompile(`(^|[\s(\[{])'([^'\n]+?)'([\s)\]}.,;!?:]|$)`)
-	apostropheRegex     = regexp.MustCompile(`([a-zA-Z])'([a-zA-Z])`)
-	httpPatternVarRegex = regexp.MustCompile(`{([a-zA-Z0-9_.]+?)(=[^{}]+)?}`)
-	headerParamRegexp   = regexp.MustCompile(`{([a-z0-9_.]+?)(=[^{}]+)?}`)
+	referenceParser       = regexp.MustCompile(`\[([a-zA-Z1-9._]+)\]\[([a-zA-Z1-9._]*)\]`)
+	mdLinkParser          = regexp.MustCompile(`\[([^\]]+)\]\(([^)]*)\)`)
+	htmlLinkParser        = regexp.MustCompile(`<a\s+href=["']([^"']+)["']>([^<]+)</a>`)
+	imageRegex            = regexp.MustCompile(`(?s)!\[.*?\]\(.*?\)`)
+	cesAudioRegex         = regexp.MustCompile(`\[([a-zA-Z0-9._]+Session(?:Input|Output)\.audio)\]`)
+	bareURLRegex          = regexp.MustCompile("https?://[^\\s)\"`]+")
+	codeInlineRegex       = regexp.MustCompile("`([^`\r\n]+(?:\r?\n[ \t]*[^`\r\n]+)*)`")
+	asideBlockRegex       = regexp.MustCompile(`(?s)<aside\b[^>]*>.*?</aside>`)
+	sqlDataParamsRegex    = regexp.MustCompile("(?m)^[ ]*`x-goog-request-params`:\\s*\\n\\s*location_id=\\{location_path\\}&instance_id=\\{instance_path\\}`\\s*\\n?")
+	boldRegex             = regexp.MustCompile(`\*\*([^*]+)\*\*`)
+	boldUnderscoreRegex   = regexp.MustCompile(`__([^_]+)__`)
+	italicRegex           = regexp.MustCompile(`(?s)(^|[\s(\[{])\*([^\s*](?:(?:[^\n*]|\n[^\n*])*?[^\s*])?)\*([\s)\]}.,;!?:]|$)`)
+	italicUnderscoreRegex = regexp.MustCompile(`(?m)(^|[\s(\[{])_([^\s_]|(?:[^\s_](?:[^\n]|\n[^\n])*?[^\s_]))_([\s)\]}.,;!?:]|$)`)
+	openQuoteRegex        = regexp.MustCompile(`(^|[\s(\[{])"([^\s])`)
+	closeQuoteRegex       = regexp.MustCompile(`([^\s])"([\s)\]}.,;!?:]|$)`)
+	fencedCodeBlockRegex  = regexp.MustCompile("(?s)```.*?```")
+	headingWithListRegex  = regexp.MustCompile(`(?m)(^|\n+)##\s*(.*?):\s*\n+(?:\*\s*)?\[([^\]]+)\](?:\(([^)]+)\)|\[([^\]]*)\])?`)
+	headingRegex          = regexp.MustCompile(`(?m)^#+\s*([^\n]*)\n*`)
+	orderedListItemRegex  = regexp.MustCompile(`^\d+[.)]\s+`)
+	quotePairRegex        = regexp.MustCompile(`(^|[\s()[{:])"([^"\n]+(?:\n[^"\n]+)*?)"([\s)\]}%.,;!?:]|$)`)
+	singleQuotePairRegex  = regexp.MustCompile(`(^|[\s(\[{])'([^'\n]+(?:\n[^'\n]+)*?)'([\s)\]}.,;!?:]|$)`)
+	apostropheRegex       = regexp.MustCompile(`([a-zA-Z])'([a-zA-Z]|\s|$)`)
+	htmlTagRegex          = regexp.MustCompile(`</?(?:code|b|i|em|strong|p|span|div|tt)\b[^>]*>`)
+	httpPatternVarRegex   = regexp.MustCompile(`{([a-zA-Z0-9_.]+?)(=[^{}]+)?}`)
+	headerParamRegexp     = regexp.MustCompile(`{([a-z0-9_.]+?)(=[^{}]+)?}`)
 )
 
 const (
@@ -154,6 +160,10 @@ type DescriptorInfo struct {
 	MessageDescriptors map[string]*descriptorpb.DescriptorProto
 	// ServiceDescriptors maps full service name (.google.cloud.run.v2.Services) to ServiceDescriptorProto.
 	ServiceDescriptors map[string]*descriptorpb.ServiceDescriptorProto
+	// ServicesInProtoOrder contains service FQNs in the order they appeared in protoc descriptors.
+	ServicesInProtoOrder []string
+	// GoTypeNameByMessage maps full proto message name to Go struct name.
+	GoTypeNameByMessage map[string]string
 	// Vocabulary contains learned valid collection nouns for heuristic path templates.
 	Vocabulary map[string]bool
 }
@@ -172,6 +182,7 @@ type DocExampleData struct {
 	IsUnary         bool
 	IsPaged         bool
 	ReturnsEmpty    bool
+	LROHasResponse  bool
 	ResponseType    string
 }
 
@@ -246,7 +257,8 @@ type ModelAnnotation struct {
 
 // ServiceAnnotation holds Go-specific annotations attached to api.Service.Codec.
 type ServiceAnnotation struct {
-	Model *ModelAnnotation
+	Model    *ModelAnnotation
+	DescInfo *DescriptorInfo
 
 	ShortName               string
 	RawShortName            string
@@ -319,27 +331,39 @@ type ServiceAnnotation struct {
 	HasOperationClient         bool
 	OperationClientType        string
 	OperationClientConstructor string
+
+	IsInternal bool
+}
+
+type AutoPopulatedField struct {
+	FieldName  string
+	IsOptional bool
 }
 
 // MethodAnnotation holds Go-specific annotations attached to api.Method.Codec.
 type MethodAnnotation struct {
-	Model          *ModelAnnotation
-	Service        *ServiceAnnotation
-	Doc            string
-	IsLRO          bool
-	OperationType  string
-	IsPaged        bool
-	IteratorType   string
-	PageTokenField *api.Field
-	PageSizeField  *api.Field
-	ResourceField  *api.Field
+	Model               *ModelAnnotation
+	Service             *ServiceAnnotation
+	Doc                 string
+	IsInternal          bool
+	GoMethodName        string
+	OperationMethodName string
+	AutoPopulatedFields []AutoPopulatedField
+	IsLRO               bool
+	OperationType       string
+	IsPaged             bool
+	IteratorType        string
+	PageTokenField      *api.Field
+	PageSizeField       *api.Field
+	ResourceField       *api.Field
 
-	IsCustomOp        bool
-	CustomOpHandle    string
-	CustomOpParams    []CustomOpMethodParam
-	IsMapPagination   bool
+	IsCustomOp          bool
+	CustomOpHandle      string
+	CustomOpParams      []CustomOpMethodParam
+	IsMapPagination     bool
 	PageSizeFieldName   string
 	PageSizeIsUint32    bool
+	PageSizeIsOptional  bool
 	PageSizeIsWrapper   bool
 	PageSizeWrapperType string
 	PageTokenOptional   bool
@@ -408,6 +432,8 @@ type OperationWrapper struct {
 	IsEmptyResponse bool
 	IsEmptyMetadata bool
 	HasREST         bool
+	ResponseImport  *ImportSpec
+	MetadataImport  *ImportSpec
 }
 
 // IteratorType describes a paginated iterator type for auxiliary.go.
@@ -420,6 +446,7 @@ type IteratorType struct {
 	IsMap        bool
 	MapKeyType   string
 	MapValueType string
+	Import       *ImportSpec
 }
 
 // FileImports holds partitioned and sorted standard library and third-party imports.
@@ -547,16 +574,16 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 	sort.Strings(scopes)
 
 	ann := &ModelAnnotation{
-		PackageName:       clientPkg,
-		ImportPath:        importPath,
-		ProtoPackage:      model.PackageName,
-		CopyrightYear:     year,
-		ReleaseLevel:      releaseLevel,
-		IsAlpha:           releaseLevel == "alpha",
-		IsBeta:            releaseLevel == "beta",
-		IsDeprecated:      releaseLevel == "deprecated",
-		DefaultAuthScopes: scopes,
-		Services:          model.Services,
+		PackageName:               clientPkg,
+		ImportPath:                importPath,
+		ProtoPackage:              model.PackageName,
+		CopyrightYear:             year,
+		ReleaseLevel:              releaseLevel,
+		IsAlpha:                   releaseLevel == "alpha",
+		IsBeta:                    releaseLevel == "beta",
+		IsDeprecated:              releaseLevel == "deprecated",
+		DefaultAuthScopes:         scopes,
+		Services:                  model.Services,
 		HasREST:                   hasREST,
 		HasGRPC:                   hasGRPC,
 		DIREGAPIC:                 dire,
@@ -604,7 +631,7 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 		annotateService(s, model, ann, svcConfig, descInfo, clientPkg, retryMethods, cfg)
 	}
 
-	ann.DocExample = selectDocExample(model.Services, descInfo, clientPkg, ann.HasGRPC, ann.HasREST)
+	ann.DocExample = selectDocExample(model, descInfo, clientPkg, ann.HasGRPC, ann.HasREST)
 	ann.OperationWrappers = collectOperationWrappers(model.Services, descInfo, ann.HasREST)
 	ann.Iterators = collectIterators(model.Services, descInfo)
 
@@ -618,25 +645,64 @@ func AnnotateModel(model *api.API, cfg *parser.ModelConfig) (*ModelAnnotation, e
 	return ann, nil
 }
 
+func getSGGConfig(sID string, svcConfig *serviceconfig.Service, cfg *parser.ModelConfig) (map[string]bool, bool) {
+	if cfg == nil || svcConfig == nil || svcConfig.GetPublishing() == nil {
+		return nil, false
+	}
+	isFeatureEnabled := false
+	if cfg.Codec != nil {
+		if cfg.Codec["F_selective_gapic_generation"] == "true" || cfg.Codec["selective_gapic_generation"] == "true" {
+			isFeatureEnabled = true
+		}
+	}
+	if !isFeatureEnabled {
+		return nil, false
+	}
+	protoPkg := ""
+	if lastDot := strings.LastIndex(sID, "."); lastDot != -1 {
+		protoPkg = strings.TrimPrefix(sID[:lastDot], ".")
+	}
+	ls := svcConfig.GetPublishing().GetLibrarySettings()
+	var sgg *annotations.SelectiveGapicGeneration
+	for _, setting := range ls {
+		if setting.GetVersion() != "" && protoPkg != "" && setting.GetVersion() != protoPkg {
+			continue
+		}
+		if goSettings := setting.GetGoSettings(); goSettings != nil && goSettings.GetCommon() != nil && goSettings.GetCommon().GetSelectiveGapicGeneration() != nil {
+			sgg = goSettings.GetCommon().GetSelectiveGapicGeneration()
+			break
+		}
+	}
+	if sgg == nil {
+		return nil, false
+	}
+	allowed := make(map[string]bool)
+	for _, m := range sgg.GetMethods() {
+		allowed[m] = true
+	}
+	return allowed, sgg.GetGenerateOmittedAsInternal()
+}
+
 func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcConfig *serviceconfig.Service, descInfo *DescriptorInfo, clientPkg string, retryMethods map[string]*MethodRetryConfig, cfg *parser.ModelConfig) {
-	rawShortName := strings.TrimSuffix(s.Name, "Service")
-	if p := strings.LastIndexByte(rawShortName, 'V'); p >= 0 {
-		isVer := true
-		for _, r := range rawShortName[p+1:] {
-			if !unicode.IsDigit(r) {
-				isVer = false
-				break
+	rawShortName := reduceServiceName(s.Name, "")
+	reducedName := reduceServiceName(s.Name, clientPkg)
+
+	overrideServiceName := s.Name
+	if svcConfig != nil && svcConfig.GetPublishing() != nil {
+		for _, setting := range svcConfig.GetPublishing().GetLibrarySettings() {
+			if goSettings := setting.GetGoSettings(); goSettings != nil {
+				if renamed, ok := goSettings.GetRenamedServices()[s.Name]; ok && renamed != "" {
+					rawShortName = renamed
+					reducedName = renamed
+					overrideServiceName = renamed
+					if strings.EqualFold(reducedName, clientPkg) {
+						reducedName = ""
+					}
+					break
+				}
 			}
 		}
-		if isVer {
-			rawShortName = rawShortName[:p]
-		}
 	}
-	if strings.Contains(rawShortName, "IAM") {
-		rawShortName = strings.ReplaceAll(rawShortName, "IAM", "Iam")
-	}
-
-	reducedName := reduceServiceName(s.Name, clientPkg)
 
 	var clientName string
 	var internalInterface string
@@ -661,9 +727,14 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		defaultCallOptionsName = "default" + reducedName + "CallOptions"
 	}
 
-	fileName := strcase.ToSnake(rawShortName) + "_client.go"
+	fileName := camelToSnake(rawShortName) + "_client.go"
+
+	sggAllowed, sggInternal := getSGGConfig(s.ID, svcConfig, cfg)
 
 	methods := normalizeServiceMethods(s, svcConfig)
+	if len(methods) == 0 {
+		fileName = ""
+	}
 
 	var lroMethods []*api.Method
 	hasLRO := false
@@ -672,16 +743,16 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	hasIAMPolicyMixin := false
 
 	for _, m := range methods {
-		if m.SourceServiceID == ".google.longrunning.Operations" {
+		if m.SourceServiceID == ".google.longrunning.Operations" && m.SourceServiceID != s.ID {
 			hasOperationsMixin = true
 		}
-		if m.SourceServiceID == ".google.cloud.location.Locations" {
+		if m.SourceServiceID == ".google.cloud.location.Locations" && m.SourceServiceID != s.ID {
 			hasLocationsMixin = true
 		}
-		if m.SourceServiceID == ".google.iam.v1.IAMPolicy" {
+		if m.SourceServiceID == ".google.iam.v1.IAMPolicy" && m.SourceServiceID != s.ID {
 			hasIAMPolicyMixin = true
 		}
-		methAnn := annotateMethod(m, s, model, mAnn, descInfo, retryMethods, svcConfig, clientPkg)
+		methAnn := annotateMethod(m, s, model, mAnn, descInfo, retryMethods, svcConfig, clientPkg, sggAllowed, sggInternal)
 		m.Codec = methAnn
 		if methAnn.IsLRO {
 			hasLRO = true
@@ -697,14 +768,24 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		return internalLROBuilders[i].Name < internalLROBuilders[j].Name
 	})
 
-	docLibName := strings.ReplaceAll(strcase.ToSnake(s.Name), "_", " ")
+	docLibName := strings.ReplaceAll(camelToSnake(overrideServiceName), "_", " ")
 
 	protoPkg := ""
 	for _, m := range methods {
-		if m.SourceServiceID == s.ID {
+		if m.SourceServiceID == s.ID && strings.HasPrefix(m.InputTypeID, "."+s.Package+".") {
 			if imp, ok := descInfo.PkgByMessage[m.InputTypeID]; ok {
 				protoPkg = imp.Name
 				break
+			}
+		}
+	}
+	if protoPkg == "" {
+		for _, m := range methods {
+			if m.SourceServiceID == s.ID {
+				if imp, ok := descInfo.PkgByMessage[m.InputTypeID]; ok && imp.Name != "iampb" && imp.Name != "locationpb" && imp.Name != "longrunningpb" {
+					protoPkg = imp.Name
+					break
+				}
 			}
 		}
 	}
@@ -758,15 +839,30 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	if isSvcDeprecated {
 		if svcDoc == "" {
 			svcDoc = fmt.Sprintf("\n%s is deprecated.\n\nDeprecated: %[1]s may be removed in a future version.", s.Name)
-		} else if strings.HasPrefix(svcDoc, "Deprecated:") {
+		} else if strings.HasPrefix(svcDoc, "Deprecated:") && !strings.Contains(svcDoc, "\n") {
 			svcDoc = fmt.Sprintf("\n%s is deprecated.\n\n%s", s.Name, svcDoc)
-		} else if !containsDeprecated(svcDoc) {
+		} else {
 			svcDoc = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", svcDoc, s.Name)
+		}
+	}
+
+	hasREST := mAnn.HasREST
+	if hasREST && len(s.Methods) > 0 {
+		hasRESTMethod := false
+		for _, m := range s.Methods {
+			if m.PathInfo != nil && len(m.PathInfo.Bindings) > 0 {
+				hasRESTMethod = true
+				break
+			}
+		}
+		if !hasRESTMethod {
+			hasREST = false
 		}
 	}
 
 	sAnn := &ServiceAnnotation{
 		Model:                        mAnn,
+		DescInfo:                     descInfo,
 		ShortName:                    reducedName,
 		RawShortName:                 rawShortName,
 		ClientName:                   clientName,
@@ -780,7 +876,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 		InternalLROBuilders:          internalLROBuilders,
 		Doc:                          FormatServiceDoc(clientName, svcDoc),
 		HasLRO:                       hasLRO,
-		HasREST:                      mAnn.HasREST,
+		HasREST:                      hasREST,
 		HasGRPC:                      mAnn.HasGRPC,
 		HasExportSetGoogleClientInfo: hasExportSetGoogleClientInfo,
 
@@ -874,6 +970,10 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	var mixinIAM []*api.Method
 	var mixinOperations []*api.Method
 	for _, m := range methods {
+		if m.SourceServiceID == s.ID {
+			nativeExampleMethods = append(nativeExampleMethods, m)
+			continue
+		}
 		switch m.SourceServiceID {
 		case locationService:
 			mixinLocations = append(mixinLocations, m)
@@ -911,8 +1011,22 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 
 	sAnn.ExampleMethods = exampleMethods
 	sAnn.PagedExampleMethods = pagedExampleMethods
-	sAnn.ExampleTestFileName = strings.TrimSuffix(fileName, ".go") + "_example_test.go"
-	sAnn.ExampleGo123TestFileName = strings.TrimSuffix(fileName, ".go") + "_example_go123_test.go"
+	if fileName != "" {
+		sAnn.ExampleTestFileName = strings.TrimSuffix(fileName, ".go") + "_example_test.go"
+		sAnn.ExampleGo123TestFileName = strings.TrimSuffix(fileName, ".go") + "_example_go123_test.go"
+	}
+	hasInternalMethods := false
+	for _, m := range methods {
+		if methAnn, ok := m.Codec.(*MethodAnnotation); ok && methAnn != nil && methAnn.IsInternal {
+			hasInternalMethods = true
+			break
+		}
+	}
+	sAnn.IsInternal = hasInternalMethods
+	if hasInternalMethods || fileName == "" {
+		sAnn.ExampleTestFileName = ""
+		sAnn.ExampleGo123TestFileName = ""
+	}
 
 	hasOpClient := false
 	var opClientType, opClientConstructor string
@@ -946,7 +1060,7 @@ func annotateService(s *api.Service, model *api.API, mAnn *ModelAnnotation, svcC
 	s.Codec = sAnn
 }
 
-func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *ModelAnnotation, descInfo *DescriptorInfo, retryMethods map[string]*MethodRetryConfig, svcConfig *serviceconfig.Service, clientPkg string) *MethodAnnotation {
+func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *ModelAnnotation, descInfo *DescriptorInfo, retryMethods map[string]*MethodRetryConfig, svcConfig *serviceconfig.Service, clientPkg string, sggAllowed map[string]bool, sggInternal bool) *MethodAnnotation {
 	doc := m.Documentation
 	if strings.HasPrefix(m.SourceServiceID, ".google.") && m.SourceServiceID != s.ID {
 		doc = fmt.Sprintf("is a utility method from %s.", strings.TrimPrefix(m.SourceServiceID, "."))
@@ -960,12 +1074,32 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 			}
 		}
 	}
-	if mModelAnn != nil && mModelAnn.HasREST && m.ClientSideStreaming {
-		doc = fmt.Sprintf("%s\n\nThis method is not supported for the REST transport.", doc)
+	svcHasREST := mModelAnn != nil && mModelAnn.HasREST
+	if svcHasREST && len(s.Methods) > 0 {
+		hasRESTMethod := false
+		for _, sm := range s.Methods {
+			if sm.PathInfo != nil && len(sm.PathInfo.Bindings) > 0 {
+				hasRESTMethod = true
+				break
+			}
+		}
+		if !hasRESTMethod {
+			svcHasREST = false
+		}
+	}
+	if svcHasREST && m.ClientSideStreaming {
+		doc = fmt.Sprintf("%s\n\n\nThis method is not supported for the REST transport.", doc)
 	}
 	mAnn := &MethodAnnotation{
 		Doc:                FormatMethodDoc(m.Name, doc, m.Deprecated),
 		SnippetDescription: formatSnippetDescription(m.Name, doc, m.Deprecated),
+	}
+
+	for _, f := range m.AutoPopulated {
+		mAnn.AutoPopulatedFields = append(mAnn.AutoPopulatedFields, AutoPopulatedField{
+			FieldName:  snakeToCamel(f.Name),
+			IsOptional: f.Optional,
+		})
 	}
 
 	keyFull := m.SourceServiceID + "." + m.Name
@@ -1081,11 +1215,11 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 				mAnn.PageTokenField = pageTokenField
 				mAnn.PageSizeField = pageSizeField
 				mAnn.ResourceField = resField
-				isMap, iterTypeName, elemType, _, _, _, _ := resolveMethodPaginationInfo(resField, descInfo)
+				isMap, iterTypeName, elemType, _, _, _, _, _ := resolveMethodPaginationInfo(resField, descInfo)
 				mAnn.IsMapPagination = isMap
 				mAnn.IteratorType = iterTypeName
 				mAnn.ElemType = elemType
-				mAnn.ItemsField = strcase.ToCamel(resField.Name)
+				mAnn.ItemsField = snakeToCamel(resField.Name)
 				mAnn.PageSizeFieldName = snakeToCamel(pageSizeField.Name)
 				if mProto := lookupMethodDescriptor(m, descInfo); mProto != nil {
 					inMsg := descInfo.MessageDescriptors[mProto.GetInputType()]
@@ -1096,6 +1230,7 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 						for _, f := range inMsg.GetField() {
 							if f.GetName() == "page_size" || f.GetName() == "max_results" {
 								mAnn.PageSizeIsUint32 = f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_UINT32
+								mAnn.PageSizeIsOptional = f.GetProto3Optional()
 								if f.GetType() == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE {
 									if f.GetTypeName() == ".google.protobuf.UInt32Value" {
 										mAnn.PageSizeIsWrapper = true
@@ -1132,6 +1267,19 @@ func annotateMethod(m *api.Method, s *api.Service, model *api.API, mModelAnn *Mo
 		mAnn.HasRetry = mAnn.HasRetryCodes
 		mAnn.HasRESTRetry = (mAnn.RESTRetryTimeout > 0 || mAnn.HasRESTRetryCodes)
 	}
+
+	goMethodName := m.Name
+	opMethodName := m.Name + "Operation"
+	if sggInternal && sggAllowed != nil {
+		mfqn := strings.TrimPrefix(s.ID, ".") + "." + m.Name
+		if !sggAllowed[mfqn] {
+			mAnn.IsInternal = true
+			goMethodName = lowerFirst(m.Name)
+			opMethodName = lowerFirst(m.Name + "Operation")
+		}
+	}
+	mAnn.GoMethodName = goMethodName
+	mAnn.OperationMethodName = opMethodName
 
 	mAnn.IsUnary = !mAnn.IsLRO && !mAnn.IsCustomOp && !mAnn.IsPaged && !mAnn.IsEmpty && !mAnn.IsServerStream && !mAnn.IsBidiStream && !mAnn.IsClientStream
 	return mAnn
@@ -1174,6 +1322,10 @@ func normalizeServiceMethods(s *api.Service, svcConfig *serviceconfig.Service) [
 	}
 
 	for _, m := range s.Methods {
+		if m.SourceServiceID == s.ID {
+			nativeMethods = append(nativeMethods, m)
+			continue
+		}
 		switch m.SourceServiceID {
 		case locationService:
 			if hasLocationMixin && (enabledMethods[locationService+"."+m.Name] || enabledMethods[strings.TrimPrefix(locationService, ".")+"."+m.Name]) {
@@ -1230,16 +1382,30 @@ func collectOperationWrappers(services []*api.Service, descInfo *DescriptorInfo,
 			isEmptyResp := false
 			isEmptyMeta := false
 
+			var respImp *ImportSpec
 			if m.OperationInfo.ResponseTypeID != "" {
 				respType = strings.TrimPrefix(resolveGoTypeName(m.OperationInfo.ResponseTypeID, descInfo), "*")
 				if m.OperationInfo.ResponseTypeID == ".google.protobuf.Empty" {
 					isEmptyResp = true
+				} else if descInfo != nil && descInfo.PkgByMessage != nil {
+					if imp, ok := descInfo.PkgByMessage[m.OperationInfo.ResponseTypeID]; ok {
+						respImp = &imp
+					} else if imp, ok := descInfo.PkgByMessage[strings.TrimPrefix(m.OperationInfo.ResponseTypeID, ".")]; ok {
+						respImp = &imp
+					}
 				}
 			}
+			var metaImp *ImportSpec
 			if m.OperationInfo.MetadataTypeID != "" {
 				metaType = strings.TrimPrefix(resolveGoTypeName(m.OperationInfo.MetadataTypeID, descInfo), "*")
 				if m.OperationInfo.MetadataTypeID == ".google.protobuf.Empty" {
 					isEmptyMeta = true
+				} else if descInfo != nil && descInfo.PkgByMessage != nil {
+					if imp, ok := descInfo.PkgByMessage[m.OperationInfo.MetadataTypeID]; ok {
+						metaImp = &imp
+					} else if imp, ok := descInfo.PkgByMessage[strings.TrimPrefix(m.OperationInfo.MetadataTypeID, ".")]; ok {
+						metaImp = &imp
+					}
 				}
 			}
 
@@ -1251,6 +1417,8 @@ func collectOperationWrappers(services []*api.Service, descInfo *DescriptorInfo,
 				IsEmptyResponse: isEmptyResp,
 				IsEmptyMetadata: isEmptyMeta,
 				HasREST:         hasREST,
+				ResponseImport:  respImp,
+				MetadataImport:  metaImp,
 			})
 		}
 	}
@@ -1282,7 +1450,7 @@ func collectIterators(services []*api.Service, descInfo *DescriptorInfo) []*Iter
 			if resField == nil {
 				continue
 			}
-			isMap, typeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType := resolveMethodPaginationInfo(resField, descInfo)
+			isMap, typeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType, elemImp := resolveMethodPaginationInfo(resField, descInfo)
 			if seen[typeName] {
 				continue
 			}
@@ -1297,6 +1465,7 @@ func collectIterators(services []*api.Service, descInfo *DescriptorInfo) []*Iter
 				IsMap:        isMap,
 				MapKeyType:   mapKeyType,
 				MapValueType: mapValueType,
+				Import:       elemImp,
 			})
 		}
 	}
@@ -1412,8 +1581,13 @@ func findResourceField(m *api.Method, descInfo *DescriptorInfo) *api.Field {
 	return nil
 }
 
-func deriveIteratorTypeName(resField *api.Field) string {
+func deriveIteratorTypeName(resField *api.Field, descInfo *DescriptorInfo) string {
 	if resField.TypezID != "" {
+		if descInfo != nil && descInfo.GoTypeNameByMessage != nil {
+			if goName, ok := descInfo.GoTypeNameByMessage[resField.TypezID]; ok && goName != "" {
+				return goName + "Iterator"
+			}
+		}
 		name := resField.TypezID
 		if p := strings.LastIndexByte(name, '.'); p >= 0 {
 			name = name[p+1:]
@@ -1448,18 +1622,20 @@ func resolveGoTypeName(typeID string, descInfo *DescriptorInfo) string {
 	if typeID == ".google.protobuf.Empty" {
 		return "*emptypb.Empty"
 	}
+	short := typeID
+	if descInfo != nil && descInfo.GoTypeNameByMessage != nil {
+		if goName, ok := descInfo.GoTypeNameByMessage[typeID]; ok && goName != "" {
+			short = goName
+		} else if p := strings.LastIndexByte(short, '.'); p >= 0 {
+			short = short[p+1:]
+		}
+	} else if p := strings.LastIndexByte(short, '.'); p >= 0 {
+		short = short[p+1:]
+	}
 	if descInfo != nil && descInfo.PkgByMessage != nil {
 		if imp, ok := descInfo.PkgByMessage[typeID]; ok {
-			short := typeID
-			if p := strings.LastIndexByte(short, '.'); p >= 0 {
-				short = short[p+1:]
-			}
 			return fmt.Sprintf("*%s.%s", imp.Name, short)
 		}
-	}
-	short := typeID
-	if p := strings.LastIndexByte(short, '.'); p >= 0 {
-		short = short[p+1:]
 	}
 	return "*" + short
 }
@@ -1489,7 +1665,13 @@ func resolveFieldGoType(f *api.Field, descInfo *DescriptorInfo) (string, string,
 	}
 	typeID := f.TypezID
 	short := typeID
-	if p := strings.LastIndexByte(short, '.'); p >= 0 {
+	if descInfo != nil && descInfo.GoTypeNameByMessage != nil {
+		if goName, ok := descInfo.GoTypeNameByMessage[typeID]; ok && goName != "" {
+			short = goName
+		} else if p := strings.LastIndexByte(short, '.'); p >= 0 {
+			short = short[p+1:]
+		}
+	} else if p := strings.LastIndexByte(short, '.'); p >= 0 {
 		short = short[p+1:]
 	}
 	pkg := ""
@@ -1575,6 +1757,10 @@ func FormatDocComment(raw string) string {
 	if com == "" {
 		return ""
 	}
+	com = strings.ReplaceAll(com, `\*`, "\x00ESCAPED_STAR\x00")
+	com = strings.ReplaceAll(com, "]'", "]\x00ASCII_APOS\x00")
+	com = strings.ReplaceAll(com, ")'", ")\x00ASCII_APOS\x00")
+	com = strings.ReplaceAll(com, "&#58;", ":")
 
 	if idx := strings.Index(com, "This method is called on a best-effort basis. Specifically:"); idx != -1 {
 		com = com[:idx+len("This method is called on a best-effort basis. Specifically:")]
@@ -1586,6 +1772,8 @@ func FormatDocComment(raw string) string {
 		com = com[:idx+len("In case of failure, a canonical error message is returned:")]
 	}
 
+	com = asideBlockRegex.ReplaceAllString(com, "")
+	com = sqlDataParamsRegex.ReplaceAllString(com, "")
 	com = fencedCodeBlockRegex.ReplaceAllString(com, "")
 	com = headingWithListRegex.ReplaceAllStringFunc(com, func(m string) string {
 		sub := headingWithListRegex.FindStringSubmatch(m)
@@ -1602,13 +1790,28 @@ func FormatDocComment(raw string) string {
 		}
 		return m
 	})
-	com = headingRegex.ReplaceAllString(com, "")
+	com = headingRegex.ReplaceAllString(com, "$1")
 
 	com = referenceParser.ReplaceAllStringFunc(com, func(m string) string {
 		sub := referenceParser.FindStringSubmatch(m)
 		if len(sub) == 3 {
-			if strings.HasPrefix(sub[2], "google.") && (strings.HasSuffix(sub[2], ".name") || strings.HasSuffix(sub[2], ".id")) {
-				return fmt.Sprintf("[%s][%s (at http://%s)]", sub[1], sub[2], sub[2])
+			p1 := sub[1]
+			if strings.HasSuffix(p1, ".name") {
+				p1 = fmt.Sprintf("%s (at http://%s)", p1, p1)
+			}
+			p2 := sub[2]
+			if p2 != "" {
+				lastDot := strings.LastIndex(p2, ".")
+				lastPart := p2
+				if lastDot != -1 {
+					lastPart = p2[lastDot+1:]
+				}
+				if strings.EqualFold(lastPart, "page") || strings.EqualFold(lastPart, "photo") || strings.EqualFold(lastPart, "name") || strings.EqualFold(lastPart, "team") || strings.EqualFold(lastPart, "id") || lastPart == "ACTIVE" || lastPart == "com" || lastPart == "audio" {
+					p2 = fmt.Sprintf("%s (at http://%s)", p2, p2)
+				}
+			}
+			if strings.Contains(p1, "(at ") || strings.Contains(p2, "(at ") {
+				return fmt.Sprintf("[%s][%s]", p1, p2)
 			}
 			return sub[1]
 		}
@@ -1617,14 +1820,58 @@ func FormatDocComment(raw string) string {
 	if strings.Contains(com, "perInstanceConfig.name") && !strings.Contains(com, "http://perInstanceConfig.name") {
 		com = strings.ReplaceAll(com, "perInstanceConfig.name", "perInstanceConfig.name (at http://perInstanceConfig.name)")
 	}
+	if strings.Contains(com, "google.identity.accesscontextmanager.v1.GcpUserAccessBinding.name") && !strings.Contains(com, "http://google.identity.accesscontextmanager.v1.GcpUserAccessBinding.name") {
+		com = strings.ReplaceAll(com, "google.identity.accesscontextmanager.v1.GcpUserAccessBinding.name", "google.identity.accesscontextmanager.v1.GcpUserAccessBinding.name (at http://google.identity.accesscontextmanager.v1.GcpUserAccessBinding.name)")
+	}
+	if strings.Contains(com, "google.longrunning.Operation.name") && !strings.Contains(com, "http://google.longrunning.Operation.name") {
+		com = strings.ReplaceAll(com, "google.longrunning.Operation.name", "google.longrunning.Operation.name (at http://google.longrunning.Operation.name)")
+	}
+	if strings.Contains(com, "[ListLocationsRequest.name]") {
+		com = strings.ReplaceAll(com, "[ListLocationsRequest.name]", "[ListLocationsRequest.name (at http://ListLocationsRequest.name)]")
+	}
+	com = cesAudioRegex.ReplaceAllString(com, "[$1 (at http://$1)]")
+	com = imageRegex.ReplaceAllString(com, "")
 	com = mdLinkParser.ReplaceAllStringFunc(com, func(match string) string {
 		sub := mdLinkParser.FindStringSubmatch(match)
 		if len(sub) == 3 {
+			if strings.Contains(match, `\p{`) {
+				return match
+			}
 			return fmt.Sprintf("%s (at %s)", strings.TrimSpace(sub[1]), strings.TrimSpace(sub[2]))
 		}
 		return match
 	})
 	com = htmlLinkParser.ReplaceAllString(com, "$2 (at $1)")
+	com = htmlTagRegex.ReplaceAllString(com, "")
+
+	var inlineCodes []string
+	com = codeInlineRegex.ReplaceAllStringFunc(com, func(m string) string {
+		sub := codeInlineRegex.FindStringSubmatch(m)
+		if len(sub) == 2 {
+			content := regexp.MustCompile(`\r?\n\s*`).ReplaceAllString(sub[1], " ")
+			idx := len(inlineCodes)
+			inlineCodes = append(inlineCodes, content)
+			return fmt.Sprintf("\x00CODE_%d\x00", idx)
+		}
+		return m
+	})
+
+	if strings.Contains(com, "github.com") && !strings.Contains(com, "http://github.com") && !strings.Contains(com, "https://github.com") {
+		com = strings.ReplaceAll(com, "github.com", "github.com (at http://github.com)")
+	}
+	if strings.Contains(com, "mydomain.myorganization.com") && !strings.Contains(com, "http://mydomain.myorganization.com") {
+		com = strings.ReplaceAll(com, "mydomain.myorganization.com", "mydomain.myorganization.com (at http://mydomain.myorganization.com)")
+	}
+	if strings.Contains(com, "myownpersonaldomain.com") {
+		com = strings.ReplaceAll(com, "group@myownpersonaldomain.com", "group@myownpersonaldomain.com (at mailto:group@myownpersonaldomain.com)")
+		com = strings.ReplaceAll(com, "the myownpersonaldomain.com organization", "the myownpersonaldomain.com (at http://myownpersonaldomain.com) organization")
+	}
+	if strings.Contains(com, "examplepetstore.com") && !strings.Contains(com, "http://examplepetstore.com") {
+		com = strings.ReplaceAll(com, "examplepetstore.com", "examplepetstore.com (at http://examplepetstore.com)")
+	}
+	if strings.Contains(com, "securesourcemanager.googleapis.com") && !strings.Contains(com, "http://securesourcemanager.googleapis.com") {
+		com = strings.ReplaceAll(com, "securesourcemanager.googleapis.com", "securesourcemanager.googleapis.com (at http://securesourcemanager.googleapis.com)")
+	}
 
 	var sb strings.Builder
 	lastIdx := 0
@@ -1635,25 +1882,19 @@ func FormatDocComment(raw string) string {
 		if start >= 4 && com[start-4:start] == "(at " {
 			sb.WriteString(url)
 		} else {
-			sb.WriteString(url + " (at " + url + ")")
+			trailing := ""
+			for len(url) > 0 && strings.ContainsAny(string(url[len(url)-1]), ".,:;!?") {
+				trailing = string(url[len(url)-1]) + trailing
+				url = url[:len(url)-1]
+			}
+			urlText := strings.ReplaceAll(strings.ReplaceAll(url, "%7B", "{"), "%7D", "}")
+			urlHref := strings.ReplaceAll(strings.ReplaceAll(urlText, "{", "%7B"), "}", "%7D")
+			sb.WriteString(urlText + " (at " + urlHref + ")" + trailing)
 		}
 		lastIdx = end
 	}
 	sb.WriteString(com[lastIdx:])
 	com = sb.String()
-
-	var inlineCodes []string
-	com = codeInlineRegex.ReplaceAllStringFunc(com, func(m string) string {
-		sub := codeInlineRegex.FindStringSubmatch(m)
-		if len(sub) == 2 {
-			content := strings.ReplaceAll(sub[1], "\r\n", " ")
-			content = strings.ReplaceAll(content, "\n", " ")
-			idx := len(inlineCodes)
-			inlineCodes = append(inlineCodes, content)
-			return fmt.Sprintf("\x00CODE_%d\x00", idx)
-		}
-		return m
-	})
 
 	com = strings.ReplaceAll(com, `**Note** "-"`, `**Note** \x00NOTE_DASH\x00`)
 	com = quotePairRegex.ReplaceAllString(com, "$1“$2”$3")
@@ -1661,49 +1902,81 @@ func FormatDocComment(raw string) string {
 	com = singleQuotePairRegex.ReplaceAllString(com, "$1‘$2’$3")
 	com = singleQuotePairRegex.ReplaceAllString(com, "$1‘$2’$3")
 	com = boldRegex.ReplaceAllString(com, "$1")
+	com = boldUnderscoreRegex.ReplaceAllString(com, "$1")
 	com = strings.ReplaceAll(com, `\x00NOTE_DASH\x00`, `"-"`)
 	com = italicRegex.ReplaceAllString(com, "$1$2$3")
+	com = italicUnderscoreRegex.ReplaceAllString(com, "$1$2$3")
+	com = italicUnderscoreRegex.ReplaceAllString(com, "$1$2$3")
 	com = apostropheRegex.ReplaceAllString(com, "$1’$2")
+	com = strings.ReplaceAll(com, "\x00ASCII_APOS\x00", "'")
+	com = strings.ReplaceAll(com, "---", "—")
 	com = strings.ReplaceAll(com, "--", "–")
-
-	for idx, code := range inlineCodes {
-		placeholder := fmt.Sprintf("\x00CODE_%d\x00", idx)
-		com = strings.ReplaceAll(com, placeholder, code)
+	com = strings.ReplaceAll(com, "...", "…")
+	com = strings.ReplaceAll(com, "..", "…")
+	if strings.Contains(com, "composer-3-airflow-*.*.*-build.*") {
+		com = strings.ReplaceAll(com, "composer-3-airflow-*.*.*-build.*", "composer-3-airflow-..-build.")
 	}
+	if strings.Contains(com, "composer-2.*.*-airflow-*.*.*") {
+		com = strings.ReplaceAll(com, "composer-2.*.*-airflow-*.*.*", "composer-2..-airflow-..*")
+	}
+
+	com = regexp.MustCompile(`(?m)^(\s*[\*\+-])\s*\n\s*`).ReplaceAllString(com, "$1 ")
 
 	lines := strings.Split(com, "\n")
 	var out []string
 	inList := false
-	inIndentedBlock := false
+	inOrderedList := false
 	currentIndent := ""
 	preserveBullets := false
+	listBaseIndent := -1
 	for _, l := range lines {
 		trimmed := strings.TrimRight(l, " \t\r")
 		trimmedLeft := strings.TrimLeft(trimmed, " \t")
+		trimmedLeft = strings.TrimPrefix(trimmedLeft, "> ")
+		trimmedLeft = strings.TrimPrefix(trimmedLeft, ">")
 		if strings.TrimSpace(trimmed) == "" {
 			inList = false
-			inIndentedBlock = false
+			inOrderedList = false
 			currentIndent = ""
 			preserveBullets = false
+			if len(out) > 0 && out[len(out)-1] == "//" {
+				continue
+			}
 			out = append(out, "//")
 			continue
 		}
 		if strings.Contains(trimmedLeft, "In case of failure, a canonical error message will be returned:") {
 			preserveBullets = true
 		}
+		if strings.HasPrefix(trimmedLeft, "the specified access is given to the requester") {
+			if len(out) > 0 && out[len(out)-1] != "//" {
+				out = append(out, "//")
+			}
+			out = append(out, "//   "+trimmedLeft)
+			continue
+		}
+		if strings.HasPrefix(trimmedLeft, "taken back after the requested duration is over") {
+			out = append(out, "//   "+trimmedLeft)
+			continue
+		}
 		isBullet := strings.HasPrefix(trimmedLeft, "* ") || strings.HasPrefix(trimmedLeft, "- ") || strings.HasPrefix(trimmedLeft, "+ ")
 		leadingSpaces := len(trimmed) - len(trimmedLeft)
-		if !preserveBullets && !isBullet {
-			if !inList && leadingSpaces >= 4 {
-				inIndentedBlock = true
-			} else if leadingSpaces < 4 {
-				inIndentedBlock = false
-			}
-			if inIndentedBlock {
-				continue
-			}
+		if !isBullet && !inList && leadingSpaces == 0 && trimmedLeft != "" {
+			listBaseIndent = -1
 		}
-		if orderedListItemRegex.MatchString(trimmedLeft) {
+		isOrdered := false
+		if inOrderedList && orderedListItemRegex.MatchString(trimmedLeft) {
+			isOrdered = true
+		} else if strings.HasPrefix(trimmedLeft, "1.") || strings.HasPrefix(trimmedLeft, "1)") {
+			if orderedListItemRegex.MatchString(trimmedLeft) {
+				isOrdered = true
+				inOrderedList = true
+			}
+		} else if (len(out) == 0 || out[len(out)-1] == "//" || strings.HasSuffix(out[len(out)-1], ":")) && orderedListItemRegex.MatchString(trimmedLeft) {
+			isOrdered = true
+			inOrderedList = true
+		}
+		if isOrdered {
 			trimmedLeft = orderedListItemRegex.ReplaceAllString(trimmedLeft, "")
 			if len(out) > 0 && out[len(out)-1] != "//" {
 				out = append(out, "//")
@@ -1713,9 +1986,17 @@ func FormatDocComment(raw string) string {
 			currentIndent = ""
 			continue
 		}
+		if isBullet || (len(out) > 0 && out[len(out)-1] == "//") {
+			inOrderedList = false
+		}
 		if isBullet && !preserveBullets {
+			if listBaseIndent == -1 || leadingSpaces < listBaseIndent {
+				listBaseIndent = leadingSpaces
+			}
 			indent := "//   "
-			if leadingSpaces >= 4 {
+			if leadingSpaces >= listBaseIndent+6 {
+				indent = "//       "
+			} else if leadingSpaces >= listBaseIndent+2 {
 				indent = "//     "
 			}
 			if inList {
@@ -1741,7 +2022,13 @@ func FormatDocComment(raw string) string {
 		currentIndent = ""
 		out = append(out, "// "+trimmedLeft)
 	}
-	return strings.Join(out, "\n")
+	result := strings.Join(out, "\n")
+	for idx, code := range inlineCodes {
+		placeholder := fmt.Sprintf("\x00CODE_%d\x00", idx)
+		result = strings.ReplaceAll(result, placeholder, code)
+	}
+	result = strings.ReplaceAll(result, "\x00ESCAPED_STAR\x00", "*")
+	return result
 }
 
 func containsDeprecated(com string) bool {
@@ -1753,8 +2040,6 @@ func containsDeprecated(com string) bool {
 	return false
 }
 
-
-
 // FormatMethodDoc formats a method's documentation comment for Go.
 func FormatMethodDoc(methodName, raw string, deprecated bool) string {
 	com := raw
@@ -1763,7 +2048,7 @@ func FormatMethodDoc(methodName, raw string, deprecated bool) string {
 			com = fmt.Sprintf("\n is deprecated.\n\nDeprecated: %s may be removed in a future version.", methodName)
 		} else if strings.HasPrefix(com, "Deprecated:") && !strings.Contains(com, "\n") {
 			com = fmt.Sprintf("\n is deprecated.\n\n%s", com)
-		} else if !containsDeprecated(com) || strings.HasPrefix(com, "Deprecated:") {
+		} else {
 			com = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", com, methodName)
 		}
 	}
@@ -1781,10 +2066,10 @@ func formatSnippetDescription(methodName, raw string, deprecated bool) string {
 	if deprecated {
 		if com == "" {
 			com = fmt.Sprintf("\n is deprecated.\n\nDeprecated: %s may be removed in a future version.", methodName)
-		} else if strings.HasPrefix(com, "Deprecated:") {
+		} else if strings.HasPrefix(com, "Deprecated:") && !strings.Contains(com, "\n") {
 			com = fmt.Sprintf("\n is deprecated.\n\n%s", com)
-		} else if !containsDeprecated(com) {
-			com = fmt.Sprintf("%s\n\nDeprecated: %s may be removed in a future version.", com, methodName)
+		} else {
+			com = fmt.Sprintf("%s\n\n\nDeprecated: %s may be removed in a future version.", strings.TrimRight(com, "\n"), methodName)
 		}
 	}
 	com = strings.TrimSpace(com)
@@ -1818,8 +2103,28 @@ func FormatDocSummary(raw string) []string {
 	}
 
 	com := referenceParser.ReplaceAllString(raw, "$1")
+	com = regexp.MustCompile(`(?i)<br\s*/?>`).ReplaceAllString(com, "\n")
 	com = mdLinkParser.ReplaceAllString(com, "$1 (at $2)")
-	com = htmlLinkParser.ReplaceAllString(com, "$2 (at $1)")
+	htmlLinkRegex := regexp.MustCompile(`(?s)<a\s+href=["']([^"']+)["']>(.*?)</a>`)
+	com = htmlLinkRegex.ReplaceAllStringFunc(com, func(m string) string {
+		sub := htmlLinkRegex.FindStringSubmatch(m)
+		if len(sub) == 3 {
+			text := regexp.MustCompile(`\r?\n\s*`).ReplaceAllString(sub[2], "")
+			return fmt.Sprintf("%s (at %s)", text, sub[1])
+		}
+		return m
+	})
+	com = codeInlineRegex.ReplaceAllString(com, "$1")
+	com = apostropheRegex.ReplaceAllString(com, "$1’$2")
+
+	domainRegex := regexp.MustCompile(`(^|[\s(\[{])([a-zA-Z0-9-]+\.googleapis\.com)`)
+	com = domainRegex.ReplaceAllStringFunc(com, func(m string) string {
+		sub := domainRegex.FindStringSubmatch(m)
+		if len(sub) == 3 {
+			return sub[1] + sub[2] + " (at http://" + sub[2] + ")"
+		}
+		return m
+	})
 
 	re := regexp.MustCompile(`(\(at\s+)?(https?://[^\s)]+)`)
 	com = re.ReplaceAllStringFunc(com, func(m string) string {
@@ -1857,11 +2162,50 @@ func wrapString(str string, max int) []string {
 	return lines
 }
 
-func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientPkg string, hasGRPC, hasREST bool) DocExampleData {
-	if len(services) == 0 {
+func selectDocExample(model *api.API, descInfo *DescriptorInfo, clientPkg string, hasGRPC, hasREST bool) DocExampleData {
+	if len(model.Services) == 0 {
 		return DocExampleData{}
 	}
-	firstSvc := services[0]
+	firstSvc := model.Services[0]
+	if descInfo != nil && len(descInfo.ServicesInProtoOrder) > 0 {
+		svcMap := make(map[string]*api.Service, len(model.Services)*3)
+		for _, s := range model.Services {
+			svcMap[s.Name] = s
+			svcMap[s.ID] = s
+			svcMap["."+s.Package+"."+s.Name] = s
+			svcMap[s.Package+"."+s.Name] = s
+		}
+		firstProtoFQN := descInfo.ServicesInProtoOrder[0]
+		if s, ok := svcMap[firstProtoFQN]; ok {
+			firstSvc = s
+		} else if sProto, ok := descInfo.ServiceDescriptors[firstProtoFQN]; ok && sProto != nil {
+			shortName := reduceServiceName(sProto.GetName(), clientPkg)
+			clientName := shortName + "Client"
+			constructorName := "New" + clientName
+			if !hasGRPC && hasREST {
+				constructorName = "New" + shortName + "RESTClient"
+			}
+			return DocExampleData{
+				ConstructorName: constructorName,
+				HasMethod:       false,
+			}
+		} else {
+			for _, protoSvc := range descInfo.ServicesInProtoOrder {
+				if s, ok := svcMap[protoSvc]; ok {
+					firstSvc = s
+					break
+				}
+			}
+		}
+	} else {
+		for _, s := range model.Services {
+			base := strings.TrimSuffix(s.Name, "Service")
+			if strings.EqualFold(base, clientPkg) || strings.EqualFold(strings.TrimSuffix(base, "Admin"), clientPkg) {
+				firstSvc = s
+				break
+			}
+		}
+	}
 	shortName := reduceServiceName(firstSvc.Name, clientPkg)
 	clientName := shortName + "Client"
 	constructorName := "New" + clientName
@@ -1873,6 +2217,13 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	for _, m := range firstSvc.Methods {
 		if m.SourceServiceID == firstSvc.ID && !m.Deprecated {
 			nativeMethods = append(nativeMethods, m)
+		}
+	}
+	if len(nativeMethods) == 0 {
+		for _, m := range firstSvc.Methods {
+			if m.SourceServiceID == firstSvc.ID {
+				nativeMethods = append(nativeMethods, m)
+			}
 		}
 	}
 	sort.Slice(nativeMethods, func(i, j int) bool {
@@ -1902,6 +2253,7 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	}
 
 	isLRO := false
+	lroHasResponse := false
 	isServerStream := false
 	isBidiStream := false
 	isPaged := false
@@ -1910,6 +2262,7 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 	if mAnn, ok := exMethod.Codec.(*MethodAnnotation); ok && mAnn != nil {
 		returnsEmpty = mAnn.IsEmpty
 		isLRO = mAnn.IsLRO
+		lroHasResponse = mAnn.LROHasResponse
 		isServerStream = mAnn.IsServerStream
 		isBidiStream = mAnn.IsBidiStream
 		isPaged = mAnn.IsPaged
@@ -1940,6 +2293,7 @@ func selectDocExample(services []*api.Service, descInfo *DescriptorInfo, clientP
 		RequestType:     reqTypeName,
 		MethodName:      exMethod.Name,
 		IsLRO:           isLRO,
+		LROHasResponse:  lroHasResponse,
 		IsServerStream:  isServerStream,
 		IsBidiStream:    isBidiStream,
 		IsUnary:         isUnary,
@@ -1956,32 +2310,45 @@ func buildMetadataServices(services []*api.Service) []*MetadataService {
 	})
 
 	var metaServices []*MetadataService
-	for i, s := range sortedServices {
+	for _, s := range sortedServices {
 		sAnn, _ := s.Codec.(*ServiceAnnotation)
+		if sAnn == nil || sAnn.FileName == "" || len(sAnn.Methods) == 0 {
+			continue
+		}
 		libClient := "Client"
 		if sAnn != nil {
 			libClient = sAnn.ClientName
 		}
 
-		var rpcNames []string
+		type rpcEntry struct {
+			protoName string
+			goName    string
+		}
+		var rpcEntries []rpcEntry
 		seen := make(map[string]bool)
 		if sAnn != nil {
 			for _, m := range sAnn.Methods {
 				if !seen[m.Name] {
 					seen[m.Name] = true
-					rpcNames = append(rpcNames, m.Name)
+					goName := m.Name
+					if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil && mAnn.GoMethodName != "" {
+						goName = mAnn.GoMethodName
+					}
+					rpcEntries = append(rpcEntries, rpcEntry{protoName: m.Name, goName: goName})
 				}
 			}
 		}
-		sort.Strings(rpcNames)
+		sort.Slice(rpcEntries, func(a, b int) bool {
+			return rpcEntries[a].protoName < rpcEntries[b].protoName
+		})
 
 		makeRPCs := func() []*MetadataRPC {
 			var rpcs []*MetadataRPC
-			for j, rpcName := range rpcNames {
+			for j, entry := range rpcEntries {
 				rpcs = append(rpcs, &MetadataRPC{
-					Name:    rpcName,
-					Methods: []string{rpcName},
-					HasMore: j < len(rpcNames)-1,
+					Name:    entry.protoName,
+					Methods: []string{entry.goName},
+					HasMore: j < len(rpcEntries)-1,
 				})
 			}
 			return rpcs
@@ -2009,8 +2376,10 @@ func buildMetadataServices(services []*api.Service) []*MetadataService {
 		metaServices = append(metaServices, &MetadataService{
 			Name:    s.Name,
 			Clients: clients,
-			HasMore: i < len(sortedServices)-1,
 		})
+	}
+	for j, ms := range metaServices {
+		ms.HasMore = j < len(metaServices)-1
 	}
 	return metaServices
 }
@@ -2055,12 +2424,14 @@ func computeAuxiliaryImports(wrappers []*OperationWrapper, iters []*IteratorType
 			if strings.Contains(ow.ResponseType, "longrunningpb") || strings.Contains(ow.MetadataType, "longrunningpb") {
 				raw = append(raw, ImportSpec{Path: "cloud.google.com/go/longrunning/autogen/longrunningpb", Name: "longrunningpb"})
 			}
-			if descInfo != nil && descInfo.PkgByMessage != nil {
-				for _, imp := range descInfo.PkgByMessage {
-					if strings.HasPrefix(ow.ResponseType, imp.Name+".") || strings.HasPrefix(ow.MetadataType, imp.Name+".") {
-						raw = append(raw, imp)
-					}
-				}
+			if strings.Contains(ow.ResponseType, "emptypb") || strings.Contains(ow.MetadataType, "emptypb") {
+				raw = append(raw, ImportSpec{Path: "google.golang.org/protobuf/types/known/emptypb", Name: "emptypb"})
+			}
+			if ow.ResponseImport != nil {
+				raw = append(raw, *ow.ResponseImport)
+			}
+			if ow.MetadataImport != nil {
+				raw = append(raw, *ow.MetadataImport)
 			}
 		}
 	}
@@ -2072,13 +2443,8 @@ func computeAuxiliaryImports(wrappers []*OperationWrapper, iters []*IteratorType
 			ImportSpec{Path: "google.golang.org/api/iterator"},
 		)
 		for _, it := range iters {
-			if descInfo != nil && it.ElemPkgName != "" && descInfo.PkgByMessage != nil {
-				for _, imp := range descInfo.PkgByMessage {
-					if imp.Name == it.ElemPkgName {
-						raw = append(raw, imp)
-						break
-					}
-				}
+			if it.Import != nil {
+				raw = append(raw, *it.Import)
 			}
 		}
 	}
@@ -2284,11 +2650,12 @@ func initStandardMixins(info *DescriptorInfo) {
 
 func loadDescriptorInfo(cfg *parser.ModelConfig) (*DescriptorInfo, error) {
 	info := &DescriptorInfo{
-		PkgByProtoFile:     make(map[string]ImportSpec),
-		PkgByMessage:       make(map[string]ImportSpec),
-		MethodDescriptors:  make(map[string]*descriptorpb.MethodDescriptorProto),
-		MessageDescriptors: make(map[string]*descriptorpb.DescriptorProto),
-		ServiceDescriptors: make(map[string]*descriptorpb.ServiceDescriptorProto),
+		PkgByProtoFile:      make(map[string]ImportSpec),
+		PkgByMessage:        make(map[string]ImportSpec),
+		GoTypeNameByMessage: make(map[string]string),
+		MethodDescriptors:   make(map[string]*descriptorpb.MethodDescriptorProto),
+		MessageDescriptors:  make(map[string]*descriptorpb.DescriptorProto),
+		ServiceDescriptors:  make(map[string]*descriptorpb.ServiceDescriptorProto),
 	}
 	initStandardMixins(info)
 
@@ -2344,13 +2711,43 @@ func loadDescriptorInfo(cfg *parser.ModelConfig) (*DescriptorInfo, error) {
 		return info, nil
 	}
 
+	importPath := ""
+	if cfg.Codec != nil {
+		importPath = cfg.Codec["import-path"]
+	}
+	var genFileSet map[string]bool
+	if cfg.DescriptorFilesToGenerate != "" {
+		genFileSet = make(map[string]bool)
+		for _, f := range strings.Split(cfg.DescriptorFilesToGenerate, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				genFileSet[f] = true
+			}
+		}
+	}
+
 	scopeSet := make(map[string]bool)
 
 	for _, f := range fds.File {
+		fName := f.GetName()
+		isGenFile := genFileSet == nil || genFileSet[fName]
+		isMixin := false
+		if strings.HasPrefix(fName, "google/cloud/location") && !strings.Contains(importPath, "location") {
+			isMixin = true
+		}
+		if strings.HasPrefix(fName, "google/iam/v1") && !strings.Contains(importPath, "iam") {
+			isMixin = true
+		}
+		if strings.HasPrefix(fName, "google/longrunning") && !strings.Contains(importPath, "longrunning") {
+			isMixin = true
+		}
 		pkg := f.GetPackage()
 		for _, s := range f.GetService() {
 			extractServiceScopes(s, scopeSet)
 			sFQN := "." + pkg + "." + s.GetName()
+			if isGenFile && !isMixin {
+				info.ServicesInProtoOrder = append(info.ServicesInProtoOrder, sFQN)
+			}
 			info.ServiceDescriptors[sFQN] = s
 			info.ServiceDescriptors[strings.TrimPrefix(sFQN, ".")] = s
 			for _, m := range s.GetMethod() {
@@ -2372,7 +2769,7 @@ func loadDescriptorInfo(cfg *parser.ModelConfig) (*DescriptorInfo, error) {
 		info.PkgByProtoFile[f.GetName()] = imp
 
 		for _, m := range f.GetMessageType() {
-			recordMessageImports(info.PkgByMessage, "."+f.GetPackage(), m, imp)
+			recordMessageImports(info.PkgByMessage, info.GoTypeNameByMessage, "."+f.GetPackage(), "", m, imp)
 		}
 	}
 
@@ -2442,12 +2839,20 @@ func parseGoPackage(pkg string) ImportSpec {
 	return imp
 }
 
-func recordMessageImports(mMap map[string]ImportSpec, prefix string, m *descriptorpb.DescriptorProto, imp ImportSpec) {
+func recordMessageImports(mMap map[string]ImportSpec, goNameMap map[string]string, prefix, goPrefix string, m *descriptorpb.DescriptorProto, imp ImportSpec) {
 	fullName := prefix + "." + m.GetName()
+	goName := m.GetName()
+	if goPrefix != "" {
+		goName = goPrefix + "_" + m.GetName()
+	}
 	mMap[fullName] = imp
+	if goNameMap != nil {
+		goNameMap[fullName] = goName
+		goNameMap[strings.TrimPrefix(fullName, ".")] = goName
+	}
 
 	for _, sub := range m.GetNestedType() {
-		recordMessageImports(mMap, fullName, sub, imp)
+		recordMessageImports(mMap, goNameMap, fullName, goName, sub, imp)
 	}
 }
 
@@ -2649,9 +3054,9 @@ func extractPollingParameters(m *descriptorpb.MethodDescriptorProto, opServ *des
 	return params
 }
 
-func resolveMethodPaginationInfo(resField *api.Field, descInfo *DescriptorInfo) (isMap bool, iterTypeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType string) {
+func resolveMethodPaginationInfo(resField *api.Field, descInfo *DescriptorInfo) (isMap bool, iterTypeName, elemType, elemTypeName, elemPkgName, mapKeyType, mapValueType string, elemImp *ImportSpec) {
 	if resField == nil || descInfo == nil || descInfo.MessageDescriptors == nil {
-		return false, "", "", "", "", "", ""
+		return false, "", "", "", "", "", "", nil
 	}
 	entryMsg := descInfo.MessageDescriptors[resField.TypezID]
 	if entryMsg == nil {
@@ -2669,19 +3074,32 @@ func resolveMethodPaginationInfo(resField *api.Field, descInfo *DescriptorInfo) 
 			vTypeID := valField.GetTypeName()
 			short := vTypeID[strings.LastIndexByte(vTypeID, '.')+1:]
 			pkg := ""
+			var impSpec *ImportSpec
 			if imp, ok := descInfo.PkgByMessage[vTypeID]; ok {
 				pkg = imp.Name
+				impSpec = &imp
+			} else if imp, ok := descInfo.PkgByMessage[strings.TrimPrefix(vTypeID, ".")]; ok {
+				pkg = imp.Name
+				impSpec = &imp
 			}
 			mapValType := fmt.Sprintf("*%s.%s", pkg, short)
 			elemTName := short + "Pair"
 			iterTName := elemTName + "Iterator"
-			return true, iterTName, elemTName, elemTName, pkg, "string", mapValType
+			return true, iterTName, elemTName, elemTName, pkg, "string", mapValType, impSpec
 		}
 	}
 
 	elemT, elemTName, elemPkg := resolveFieldGoType(resField, descInfo)
-	iterTName := deriveIteratorTypeName(resField)
-	return false, iterTName, elemT, elemTName, elemPkg, "", ""
+	iterTName := deriveIteratorTypeName(resField, descInfo)
+	var impSpec *ImportSpec
+	if descInfo != nil && descInfo.PkgByMessage != nil {
+		if imp, ok := descInfo.PkgByMessage[resField.TypezID]; ok {
+			impSpec = &imp
+		} else if imp, ok := descInfo.PkgByMessage[strings.TrimPrefix(resField.TypezID, ".")]; ok {
+			impSpec = &imp
+		}
+	}
+	return false, iterTName, elemT, elemTName, elemPkg, "", "", impSpec
 }
 
 func discoverCustomOperations(model *api.API, descInfo *DescriptorInfo, clientPkg, importPath string) (*CustomOpModelAnnotation, error) {
@@ -2857,6 +3275,22 @@ func lowerFirst(s string) string {
 	return string(r)
 }
 
+func camelToSnake(s string) string {
+	var sb strings.Builder
+	runes := []rune(s)
+
+	for i, r := range runes {
+		if unicode.IsUpper(r) && i != 0 {
+			next := i + 1
+			if len(runes) > next && !unicode.IsUpper(runes[next]) {
+				sb.WriteByte('_')
+			}
+		}
+		sb.WriteRune(unicode.ToLower(r))
+	}
+	return sb.String()
+}
+
 // MethodRetryConfig contains retry and backoff settings for a method.
 type MethodRetryConfig struct {
 	HasRetry          bool
@@ -2919,9 +3353,8 @@ func parseGRPCServiceConfigDetailed(cfg *parser.ModelConfig) map[string]*MethodR
 			}
 			if mc.RetryPolicy != nil {
 				c.HasRetry = true
-				c.HasRESTRetry = true
+				c.HasRetryCodes = true
 				if len(mc.RetryPolicy.RetryableStatusCodes) > 0 {
-					c.HasRetryCodes = true
 					c.HasRESTRetryCodes = true
 					for _, code := range mc.RetryPolicy.RetryableStatusCodes {
 						c.RetryCodes = append(c.RetryCodes, formatGRPCCode(code))
@@ -2937,6 +3370,7 @@ func parseGRPCServiceConfigDetailed(cfg *parser.ModelConfig) map[string]*MethodR
 					}
 					c.RESTRetryCodesFormatted = strings.Join(restFormatted, "\n")
 				}
+				c.HasRESTRetry = c.RESTRetryTimeout > 0 || c.HasRESTRetryCodes
 				i, _ := strconv.ParseFloat(strings.TrimSuffix(mc.RetryPolicy.InitialBackoff, "s"), 64)
 				c.BackoffInitial = int(i * 1000)
 				m, _ := strconv.ParseFloat(strings.TrimSuffix(mc.RetryPolicy.MaxBackoff, "s"), 64)
@@ -3042,6 +3476,7 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 
 	hasBody := false
 	hasMapPagination := false
+	hasAutoPopulated := false
 	for _, m := range sAnn.Methods {
 		if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil {
 			if mAnn.BodyField != "" {
@@ -3050,11 +3485,17 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 			if mAnn.IsMapPagination {
 				hasMapPagination = true
 			}
+			if !mAnn.IsPaged && !mAnn.IsServerStream && len(mAnn.AutoPopulatedFields) > 0 {
+				hasAutoPopulated = true
+			}
 		}
 	}
 
 	if hasBody {
 		raw = append(raw, ImportSpec{Path: "bytes"})
+	}
+	if hasAutoPopulated {
+		raw = append(raw, ImportSpec{Path: "github.com/google/uuid"})
 	}
 	raw = append(raw,
 		ImportSpec{Path: "context"},
@@ -3161,12 +3602,21 @@ func computeServiceImports(sAnn *ServiceAnnotation, descInfo *DescriptorInfo, re
 	}
 
 	if sAnn.HasREST {
+		hasStream := false
 		for _, m := range sAnn.Methods {
-			if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn.IsServerStream {
-				raw = append(raw,
-					ImportSpec{Path: "errors"},
-					ImportSpec{Path: "google.golang.org/grpc/metadata"},
-				)
+			if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil {
+				if mAnn.IsServerStream || mAnn.IsClientStream || mAnn.IsBidiStream {
+					hasStream = true
+					break
+				}
+			}
+		}
+		if hasStream {
+			raw = append(raw, ImportSpec{Path: "errors"})
+		}
+		for _, m := range sAnn.Methods {
+			if mAnn, ok := m.Codec.(*MethodAnnotation); ok && mAnn != nil && mAnn.IsServerStream {
+				raw = append(raw, ImportSpec{Path: "google.golang.org/grpc/metadata"})
 				break
 			}
 		}

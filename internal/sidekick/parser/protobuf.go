@@ -520,6 +520,9 @@ func protobufUpdateFileOption(current, got string) (string, error) {
 	if got == "" || strings.HasPrefix(got, "Google.Protobuf.") {
 		return current, nil
 	}
+	if strings.EqualFold(current, got) {
+		return current, nil
+	}
 	return "", fmt.Errorf("mismatched file option value, want=%s got=%s", current, got)
 }
 

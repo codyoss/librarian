@@ -56,8 +56,6 @@ var (
 		".google.protobuf.Duration",
 		".google.protobuf.StringValue",
 		".google.protobuf.BytesValue",
-		".google.protobuf.Int64Value",
-		".google.protobuf.UInt64Value",
 	}
 
 	wellKnownTypeNames = []string{
@@ -596,9 +594,14 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	mProto := lookupMethodDescriptor(m, descInfo)
 	grpcStub := resolveGRPCStub(m, sAnn)
 
+	goMethodName := m.Name
+	if mAnn != nil && mAnn.GoMethodName != "" {
+		goMethodName = mAnn.GoMethodName
+	}
+
 	if mAnn.IsBidiStream || mAnn.IsClientStream {
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, opts ...gax.CallOption) (%s, error) {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.StreamClientType)
+			sAnn.GRPCClientName, goMethodName, mAnn.StreamClientType)
 		sb.WriteString("\tctx = gax.InsertMetadataIntoOutgoingContext(ctx, c.xGoogHeaders...)\n")
 		appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
 		fmt.Fprintf(&sb, "\tvar resp %s\n", mAnn.StreamClientType)
@@ -621,7 +624,7 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 
 	if mAnn.IsServerStream {
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
+			sAnn.GRPCClientName, goMethodName, mAnn.RequestType, mAnn.StreamClientType)
 		appendRoutingHeadersGRPC(&sb, m, mProto, sAnn)
 		appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
 		fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
@@ -646,16 +649,16 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	switch {
 	case mAnn.IsEmpty:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) error {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.RequestType)
+			sAnn.GRPCClientName, goMethodName, mAnn.RequestType)
 	case mAnn.IsPaged:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) *%s {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.IteratorType)
+			sAnn.GRPCClientName, goMethodName, mAnn.RequestType, mAnn.IteratorType)
 	case mAnn.IsLRO:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.OperationType)
+			sAnn.GRPCClientName, goMethodName, mAnn.RequestType, mAnn.OperationType)
 	default:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
-			sAnn.GRPCClientName, m.Name, mAnn.RequestType, mAnn.ResponseType)
+			sAnn.GRPCClientName, goMethodName, mAnn.RequestType, mAnn.ResponseType)
 	}
 
 	// Routing headers
@@ -663,6 +666,16 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 
 	// OpenTelemetry Telemetry Context
 	appendTelemetryContext(&sb, m, mProto, sAnn, descInfo, false)
+
+	if !mAnn.IsPaged && !mAnn.IsServerStream {
+		for _, apf := range mAnn.AutoPopulatedFields {
+			if apf.IsOptional {
+				fmt.Fprintf(&sb, "\tif req != nil && req.Get%s() == \"\" {\n\t\treq.%s = proto.String(uuid.NewString())\n\t}\n", apf.FieldName, apf.FieldName)
+			} else {
+				fmt.Fprintf(&sb, "\tif req != nil && req.Get%s() == \"\" {\n\t\treq.%s = uuid.NewString()\n\t}\n", apf.FieldName, apf.FieldName)
+			}
+		}
+	}
 
 	// Call options
 	fmt.Fprintf(&sb, "\topts = append((*c.CallOptions).%s[0:len((*c.CallOptions).%s):len((*c.CallOptions).%s)], opts...)\n",
@@ -692,10 +705,14 @@ func generateGRPCMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		if itemsField == "" {
 			itemsField = mAnn.IteratorType
 		}
-fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%s, string, error) {\n", elemType)
+		fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%s, string, error) {\n", elemType)
 		fmt.Fprintf(&sb, "\t\tresp := &%s{}\n", mAnn.ResponseType)
 		sb.WriteString("\t\tif pageToken != \"\" {\n")
-		sb.WriteString("\t\t\treq.PageToken = pageToken\n")
+		if mAnn.PageTokenOptional {
+			sb.WriteString("\t\t\treq.PageToken = proto.String(pageToken)\n")
+		} else {
+			sb.WriteString("\t\t\treq.PageToken = pageToken\n")
+		}
 		sb.WriteString("\t\t}\n")
 		pageSizeFieldName := mAnn.PageSizeFieldName
 		if pageSizeFieldName == "" {
@@ -716,17 +733,33 @@ fmt.Fprintf(&sb, "\tit.InternalFetch = func(pageSize int, pageToken string) ([]%
 				sb.WriteString("\t\t}\n")
 			}
 		} else if mAnn.PageSizeIsUint32 {
-			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
-			sb.WriteString("\t\t} else if pageSize != 0 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
-			sb.WriteString("\t\t}\n")
+			if mAnn.PageSizeIsOptional {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = uint32(math.MaxInt32)\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = uint32(pageSize)\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
 		} else {
-			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
-			sb.WriteString("\t\t} else if pageSize != 0 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
-			sb.WriteString("\t\t}\n")
+			if mAnn.PageSizeIsOptional {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Int32(int32(math.MaxInt32))\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Int32(int32(pageSize))\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
 		}
 		sb.WriteString("\t\terr := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
 		sb.WriteString("\t\t\tvar err error\n")
@@ -804,7 +837,7 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	mProto := lookupMethodDescriptor(m, descInfo)
 	httpInf := getHTTPInfo(mProto)
 	if httpInf == nil && (m.PathInfo == nil || len(m.PathInfo.Bindings) == 0) {
-		if mAnn.IsServerStream || mAnn.IsClientStream || mAnn.IsBidiStream {
+		if mAnn.IsServerStream {
 			return ""
 		}
 	}
@@ -842,9 +875,14 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		sb.WriteString(mAnn.Doc + "\n")
 	}
 
+	goMethodName := m.Name
+	if mAnn != nil && mAnn.GoMethodName != "" {
+		goMethodName = mAnn.GoMethodName
+	}
+
 	if mAnn.IsBidiStream || mAnn.IsClientStream {
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, opts ...gax.CallOption) (%s, error) {\n",
-			sAnn.RESTClientName, m.Name, mAnn.StreamClientType)
+			sAnn.RESTClientName, goMethodName, mAnn.StreamClientType)
 		fmt.Fprintf(&sb, "\treturn nil, errors.New(%q)\n", fmt.Sprintf("%s not yet supported for REST clients", m.Name))
 		sb.WriteString("}\n")
 		return sb.String()
@@ -854,22 +892,32 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 	switch {
 	case mAnn.IsEmpty:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) error {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType)
 	case mAnn.IsPaged:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) *%s {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.IteratorType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType, mAnn.IteratorType)
 	case mAnn.IsLRO:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.OperationType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType, mAnn.OperationType)
 	case mAnn.IsCustomOp:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*Operation, error) {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType)
 	case mAnn.IsServerStream:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (%s, error) {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.StreamClientType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType, mAnn.StreamClientType)
 	default:
 		fmt.Fprintf(&sb, "func (c *%s) %s(ctx context.Context, req *%s, opts ...gax.CallOption) (*%s, error) {\n",
-			sAnn.RESTClientName, m.Name, mAnn.RequestType, mAnn.ResponseType)
+			sAnn.RESTClientName, goMethodName, mAnn.RequestType, mAnn.ResponseType)
+	}
+
+	if !mAnn.IsPaged && !mAnn.IsServerStream {
+		for _, apf := range mAnn.AutoPopulatedFields {
+			if apf.IsOptional {
+				fmt.Fprintf(&sb, "\tif req != nil && req.Get%s() == \"\" {\n\t\treq.%s = proto.String(uuid.NewString())\n\t}\n", apf.FieldName, apf.FieldName)
+			} else {
+				fmt.Fprintf(&sb, "\tif req != nil && req.Get%s() == \"\" {\n\t\treq.%s = uuid.NewString()\n\t}\n", apf.FieldName, apf.FieldName)
+			}
+		}
 	}
 
 	// Paged REST method structure
@@ -923,17 +971,33 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 				sb.WriteString("\t\t}\n")
 			}
 		} else if mAnn.PageSizeIsUint32 {
-			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
-			sb.WriteString("\t\t} else if pageSize != 0 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
-			sb.WriteString("\t\t}\n")
+			if mAnn.PageSizeIsOptional {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(math.MaxInt32))\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Uint32(uint32(pageSize))\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = uint32(math.MaxInt32)\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = uint32(pageSize)\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
 		} else {
-			sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
-			sb.WriteString("\t\t} else if pageSize != 0 {\n")
-			fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
-			sb.WriteString("\t\t}\n")
+			if mAnn.PageSizeIsOptional {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Int32(int32(math.MaxInt32))\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = proto.Int32(int32(pageSize))\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			} else {
+				sb.WriteString("\t\tif pageSize > math.MaxInt32 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = math.MaxInt32\n", pageSizeFieldName)
+				sb.WriteString("\t\t} else if pageSize != 0 {\n")
+				fmt.Fprintf(&sb, "\t\t\treq.%s = int32(pageSize)\n", pageSizeFieldName)
+				sb.WriteString("\t\t}\n")
+			}
 		}
 
 		bodyReader := "nil"
@@ -1139,6 +1203,40 @@ func generateRESTMethod(m *api.Method, sAnn *ServiceAnnotation, mAnn *MethodAnno
 		return sb.String()
 	}
 
+	isHTTPBody := m.OutputTypeID == ".google.api.HttpBody" || m.OutputTypeID == "google.api.HttpBody" || mAnn.ResponseType == "httpbodypb.HttpBody"
+	if isHTTPBody {
+		fmt.Fprintf(&sb, "\tresp := &%s{}\n", mAnn.ResponseType)
+		sb.WriteString("\te := gax.Invoke(ctx, func(ctx context.Context, settings gax.CallSettings) error {\n")
+		sb.WriteString("\t\tif settings.Path != \"\" {\n")
+		sb.WriteString("\t\t\tbaseUrl.Path = settings.Path\n")
+		sb.WriteString("\t\t}\n")
+		fmt.Fprintf(&sb, "\t\thttpReq, err := http.NewRequest(%q, baseUrl.String(), %s)\n", verb, bodyReader)
+		sb.WriteString("\t\tif err != nil {\n")
+		sb.WriteString("\t\t\treturn err\n")
+		sb.WriteString("\t\t}\n")
+		sb.WriteString("\t\thttpReq = httpReq.WithContext(ctx)\n")
+		sb.WriteString("\t\thttpReq.Header = headers\n\n")
+
+		fmt.Fprintf(&sb, "\t\tbuf, httpRsp, err := executeHTTPRequestWithResponse(ctx, c.httpClient, httpReq, c.logger, %s, %q)\n", logBody, m.Name)
+		sb.WriteString("\t\tif err != nil {\n")
+		sb.WriteString("\t\t\treturn err\n")
+		sb.WriteString("\t\t}\n\n")
+
+		sb.WriteString("\t\tresp.Data = buf\n")
+		sb.WriteString("\t\tif headers := httpRsp.Header; len(headers[\"Content-Type\"]) > 0 {\n")
+		sb.WriteString("\t\t\tresp.ContentType = headers[\"Content-Type\"][0]\n")
+		sb.WriteString("\t\t}\n\n")
+
+		sb.WriteString("\t\treturn nil\n")
+		sb.WriteString("\t}, opts...)\n")
+		sb.WriteString("\tif e != nil {\n")
+		sb.WriteString("\t\treturn nil, e\n")
+		sb.WriteString("\t}\n")
+		sb.WriteString("\treturn resp, nil\n")
+		sb.WriteString("}\n")
+		return sb.String()
+	}
+
 	// Execution
 	if !mAnn.IsEmpty {
 		respType := mAnn.ResponseType
@@ -1258,6 +1356,62 @@ func resolveGRPCStub(m *api.Method, sAnn *ServiceAnnotation) string {
 	}
 }
 
+func formatHeaderAccessor(field string, mProto *descriptorpb.MethodDescriptorProto, descInfo *DescriptorInfo) string {
+	accessor := fmt.Sprintf("req%s", fieldGetter(field))
+	if mProto == nil || descInfo == nil || descInfo.MessageDescriptors == nil {
+		return fmt.Sprintf("url.QueryEscape(%s)", accessor)
+	}
+	inType := mProto.GetInputType()
+	msg := descInfo.MessageDescriptors[inType]
+	if msg == nil {
+		msg = descInfo.MessageDescriptors[strings.TrimPrefix(inType, ".")]
+	}
+	if msg == nil {
+		return fmt.Sprintf("url.QueryEscape(%s)", accessor)
+	}
+	parts := strings.Split(field, ".")
+	var currMsg *descriptorpb.DescriptorProto = msg
+	var lastField *descriptorpb.FieldDescriptorProto
+	for _, part := range parts {
+		if currMsg == nil {
+			lastField = nil
+			break
+		}
+		var found *descriptorpb.FieldDescriptorProto
+		for _, f := range currMsg.GetField() {
+			if f.GetName() == part {
+				found = f
+				break
+			}
+		}
+		if found == nil {
+			lastField = nil
+			break
+		}
+		lastField = found
+		if found.GetType() == descriptorpb.FieldDescriptorProto_TYPE_MESSAGE {
+			nextType := found.GetTypeName()
+			currMsg = descInfo.MessageDescriptors[nextType]
+			if currMsg == nil {
+				currMsg = descInfo.MessageDescriptors[strings.TrimPrefix(nextType, ".")]
+			}
+		} else {
+			currMsg = nil
+		}
+	}
+	if lastField != nil {
+		switch lastField.GetType() {
+		case descriptorpb.FieldDescriptorProto_TYPE_STRING:
+			return fmt.Sprintf("url.QueryEscape(%s)", accessor)
+		case descriptorpb.FieldDescriptorProto_TYPE_DOUBLE, descriptorpb.FieldDescriptorProto_TYPE_FLOAT:
+			return fmt.Sprintf("url.QueryEscape(fmt.Sprintf(\"%%g\", %s))", accessor)
+		default:
+			return accessor
+		}
+	}
+	return fmt.Sprintf("url.QueryEscape(%s)", accessor)
+}
+
 func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descriptorpb.MethodDescriptorProto, sAnn *ServiceAnnotation) {
 	if mProto != nil && dynamicRequestHeadersExist(mProto) {
 		headers := parseDynamicRequestHeaders(mProto)
@@ -1317,8 +1471,12 @@ func appendRoutingHeadersGRPC(sb *strings.Builder, m *api.Method, mProto *descri
 				continue
 			}
 			seen[field] = true
-			accessor := fmt.Sprintf("req%s", fieldGetter(field))
-			fmt.Fprintf(&values, " %q, url.QueryEscape(%s),", field, accessor)
+			var descInfo *DescriptorInfo
+			if sAnn != nil {
+				descInfo = sAnn.DescInfo
+			}
+			val := formatHeaderAccessor(field, mProto, descInfo)
+			fmt.Fprintf(&values, " %q, %s,", field, val)
 			formats.WriteString("%s=%v&")
 		}
 		f := formats.String()[:formats.Len()-1]
@@ -1391,8 +1549,12 @@ func appendRoutingHeadersREST(sb *strings.Builder, m *api.Method, mProto *descri
 				continue
 			}
 			seen[field] = true
-			accessor := fmt.Sprintf("req%s", fieldGetter(field))
-			fmt.Fprintf(&values, " %q, url.QueryEscape(%s),", field, accessor)
+			var descInfo *DescriptorInfo
+			if sAnn != nil {
+				descInfo = sAnn.DescInfo
+			}
+			val := formatHeaderAccessor(field, mProto, descInfo)
+			fmt.Fprintf(&values, " %q, %s,", field, val)
 			formats.WriteString("%s=%v&")
 		}
 		f := formats.String()[:formats.Len()-1]

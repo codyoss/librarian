@@ -894,26 +894,26 @@ func TestComputeDocCommentFormatting(t *testing.T) {
 		{
 			name:       "truncate 4-space markdown blocks after Specifically:",
 			methodName: "Wait",
-			raw: "Waits for the specified Operation resource to return as DONE.\n\nThis method is called on a best-effort basis. Specifically:\n\n\n    - In uncommon cases, when the server is overloaded, the request might\n    return before the default deadline is reached.",
-			want: "// Wait waits for the specified Operation resource to return as DONE.\n//\n// This method is called on a best-effort basis. Specifically:",
+			raw:        "Waits for the specified Operation resource to return as DONE.\n\nThis method is called on a best-effort basis. Specifically:\n\n\n    - In uncommon cases, when the server is overloaded, the request might\n    return before the default deadline is reached.",
+			want:       "// Wait waits for the specified Operation resource to return as DONE.\n//\n// This method is called on a best-effort basis. Specifically:",
 		},
 		{
 			name:       "truncate 4-space markdown blocks after Note: Use the following APIs to manage network endpoint groups:",
 			methodName: "Insert",
-			raw: "Creates a network endpoint group in the specified project.\n\nNote: Use the following APIs to manage network endpoint groups:\n\n    -\n    To manage NEGs with zonal scope: zonal API",
-			want: "// Insert creates a network endpoint group in the specified project.\n//\n// Note: Use the following APIs to manage network endpoint groups:",
+			raw:        "Creates a network endpoint group in the specified project.\n\nNote: Use the following APIs to manage network endpoint groups:\n\n    -\n    To manage NEGs with zonal scope: zonal API",
+			want:       "// Insert creates a network endpoint group in the specified project.\n//\n// Note: Use the following APIs to manage network endpoint groups:",
 		},
 		{
 			name:       "autolink perInstanceConfig.name domain",
 			methodName: "UpdatePerInstanceConfigs",
-			raw: "Inserts or updates per-instance configurations. perInstanceConfig.name serves as a key used to distinguish whether to perform insert or patch.",
-			want: "// UpdatePerInstanceConfigs inserts or updates per-instance configurations. perInstanceConfig.name (at http://perInstanceConfig.name) serves as a key used to distinguish whether to perform insert or patch.",
+			raw:        "Inserts or updates per-instance configurations. perInstanceConfig.name serves as a key used to distinguish whether to perform insert or patch.",
+			want:       "// UpdatePerInstanceConfigs inserts or updates per-instance configurations. perInstanceConfig.name (at http://perInstanceConfig.name) serves as a key used to distinguish whether to perform insert or patch.",
 		},
 		{
 			name:       "plus bullet list items and continuation",
 			methodName: "Resize",
-			raw: "Resize selection including:\n\n+ The status of the VM instance.\n+ The health of the VM instance.\ncontinuation of health.",
-			want: "// Resize resize selection including:\n//\n//   The status of the VM instance.\n//\n//   The health of the VM instance.\n//   continuation of health.",
+			raw:        "Resize selection including:\n\n+ The status of the VM instance.\n+ The health of the VM instance.\ncontinuation of health.",
+			want:       "// Resize resize selection including:\n//\n//   The status of the VM instance.\n//\n//   The health of the VM instance.\n//   continuation of health.",
 		},
 	}
 
@@ -1023,9 +1023,8 @@ func TestSelectDocExampleReturnsEmpty(t *testing.T) {
 			},
 		},
 	}
-	ex := selectDocExample([]*api.Service{svc}, nil, "test", true, true)
+	ex := selectDocExample(&api.API{Services: []*api.Service{svc}}, nil, "test", true, true)
 	if !ex.ReturnsEmpty {
 		t.Errorf("expected ReturnsEmpty to be true for method returning .google.protobuf.Empty")
 	}
 }
-

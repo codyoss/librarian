@@ -138,29 +138,29 @@ type {{Codec.InternalClientInterface}} interface {
 	Connection() *grpc.ClientConn
 {{#Codec.Methods}}
 {{#Codec.IsEmpty}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) error
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) error
 {{/Codec.IsEmpty}}
 {{#Codec.IsPaged}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) *{{Codec.IteratorType}}
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) *{{Codec.IteratorType}}
 {{/Codec.IsPaged}}
 {{#Codec.IsLRO}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.OperationType}}, error)
-	{{Codec.OperationType}}(name string) *{{Codec.OperationType}}
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.OperationType}}, error)
+	{{Codec.OperationMethodName}}(name string) *{{Codec.OperationType}}
 {{/Codec.IsLRO}}
 {{#Codec.IsCustomOp}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*Operation, error)
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*Operation, error)
 {{/Codec.IsCustomOp}}
 {{#Codec.IsUnary}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.ResponseType}}, error)
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) (*{{Codec.ResponseType}}, error)
 {{/Codec.IsUnary}}
 {{#Codec.IsBidiStream}}
-	{{Name}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+	{{Codec.GoMethodName}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
 {{/Codec.IsBidiStream}}
 {{#Codec.IsClientStream}}
-	{{Name}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+	{{Codec.GoMethodName}}(context.Context, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
 {{/Codec.IsClientStream}}
 {{#Codec.IsServerStream}}
-	{{Name}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
+	{{Codec.GoMethodName}}(context.Context, *{{Codec.RequestType}}, ...gax.CallOption) ({{Codec.StreamClientType}}, error)
 {{/Codec.IsServerStream}}
 {{/Codec.Methods}}
 }
@@ -224,49 +224,49 @@ func (c *{{Codec.ClientName}}) Connection() *grpc.ClientConn {
 {{#Codec.Methods}}
 {{{Codec.Doc}}}
 {{#Codec.IsEmpty}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) error {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) error {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 {{/Codec.IsEmpty}}
 {{#Codec.IsPaged}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) *{{Codec.IteratorType}} {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) *{{Codec.IteratorType}} {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 {{/Codec.IsPaged}}
 {{#Codec.IsLRO}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*{{Codec.OperationType}}, error) {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*{{Codec.OperationType}}, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.
-func (c *{{Codec.ClientReceiverName}}) {{Codec.OperationType}}(name string) *{{Codec.OperationType}} {
-	return c.internalClient.{{Codec.OperationType}}(name)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.OperationMethodName}}(name string) *{{Codec.OperationType}} {
+	return c.internalClient.{{Codec.OperationMethodName}}(name)
 }
 {{/Codec.IsLRO}}
 {{#Codec.IsCustomOp}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*Operation, error) {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*Operation, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 {{/Codec.IsCustomOp}}
 {{#Codec.IsUnary}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*{{Codec.ResponseType}}, error) {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) (*{{Codec.ResponseType}}, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 {{/Codec.IsUnary}}
 {{#Codec.IsBidiStream}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
-	return c.internalClient.{{Name}}(ctx, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, opts...)
 }
 {{/Codec.IsBidiStream}}
 {{#Codec.IsClientStream}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
-	return c.internalClient.{{Name}}(ctx, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, opts...)
 }
 {{/Codec.IsClientStream}}
 {{#Codec.IsServerStream}}
-func (c *{{Codec.ClientReceiverName}}) {{Name}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
-	return c.internalClient.{{Name}}(ctx, req, opts...)
+func (c *{{Codec.ClientReceiverName}}) {{Codec.GoMethodName}}(ctx context.Context, req *{{Codec.RequestType}}, opts ...gax.CallOption) ({{Codec.StreamClientType}}, error) {
+	return c.internalClient.{{Codec.GoMethodName}}(ctx, req, opts...)
 }
 {{/Codec.IsServerStream}}
 
@@ -581,7 +581,7 @@ func (c *{{Codec.RESTClientName}}) Connection() *grpc.ClientConn {
 {{#Codec.HasGRPC}}
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.
-func (c *{{Codec.GRPCClientName}}) {{Codec.OperationType}}(name string) *{{Codec.OperationType}} {
+func (c *{{Codec.GRPCClientName}}) {{Codec.OperationMethodName}}(name string) *{{Codec.OperationType}} {
 	return &{{Codec.OperationType}}{
 		lro: longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*{{Codec.PackageName}}.{{Codec.OperationType}}"),
 	}
@@ -591,7 +591,7 @@ func (c *{{Codec.GRPCClientName}}) {{Codec.OperationType}}(name string) *{{Codec
 {{#Codec.HasREST}}
 // {{Codec.OperationType}} returns a new {{Codec.OperationType}} from a given name.
 // The name must be that of a previously created {{Codec.OperationType}}, possibly from a different process.
-func (c *{{Codec.RESTClientName}}) {{Codec.OperationType}}(name string) *{{Codec.OperationType}} {
+func (c *{{Codec.RESTClientName}}) {{Codec.OperationMethodName}}(name string) *{{Codec.OperationType}} {
 	override := fmt.Sprintf("{{Codec.OperationPathOverride}}", name)
 	return &{{Codec.OperationType}}{
 		lro:      longrunning.InternalNewOperationWithMetadata(*c.LROClient, &longrunningpb.Operation{Name: name}, "*{{Codec.PackageName}}.{{Codec.OperationType}}"),

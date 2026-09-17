@@ -147,7 +147,7 @@ func GenerateSnippets(model *api.API, snippetsDir string, provider language.Temp
 	var services []*api.Service
 	for _, s := range model.Services {
 		sAnn, ok := s.Codec.(*ServiceAnnotation)
-		if !ok || sAnn == nil {
+		if !ok || sAnn == nil || sAnn.FileName == "" || len(sAnn.Methods) == 0 {
 			continue
 		}
 		services = append(services, s)
@@ -203,7 +203,10 @@ func GenerateSnippets(model *api.API, snippetsDir string, provider language.Temp
 			lines := strings.Split(strings.TrimSuffix(string(formatted), "\n"), "\n")
 			endLine := len(lines)
 
-			parentProtoPkg := protoPkg
+			parentProtoPkg := s.Package
+			if parentProtoPkg == "" {
+				parentProtoPkg = protoPkg
+			}
 			parentName := s.Name
 			if m.SourceServiceID != "" && strings.HasPrefix(m.SourceServiceID, ".google.") && m.SourceServiceID != s.ID {
 				trimmed := strings.TrimPrefix(m.SourceServiceID, ".")

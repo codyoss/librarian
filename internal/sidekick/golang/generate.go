@@ -76,6 +76,9 @@ func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.Mo
 			base == "snippet.go.mustache" {
 			continue
 		}
+		if cfg != nil && cfg.Codec != nil && cfg.Codec["omit-package-files"] == "true" {
+			continue
+		}
 		if base == "gapic_metadata.json.mustache" && (cfg == nil || cfg.Codec == nil || cfg.Codec["metadata"] != "true") {
 			continue
 		}
@@ -92,7 +95,7 @@ func Generate(ctx context.Context, model *api.API, outdir string, cfg *parser.Mo
 	// Stage 2: Generate per-service client and example files dynamically.
 	for _, s := range model.Services {
 		sAnn, ok := s.Codec.(*ServiceAnnotation)
-		if !ok || sAnn == nil || sAnn.FileName == "" {
+		if !ok || sAnn == nil || sAnn.FileName == "" || len(sAnn.Methods) == 0 {
 			continue
 		}
 		gen := language.GeneratedFile{
